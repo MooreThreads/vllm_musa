@@ -1,6 +1,7 @@
 # coding=utf-8
 # Adapted from
 # https://huggingface.co/OrionStarAI/Orion-14B-Base/blob/main/modeling_orion.py
+# Copyright (c) 2024 - 2024 Moore Threads Technology Co., Ltd("Moore Threads"). All rights reserved.
 # Copyright (c) OrionStar Inc.
 # LICENSE: https://huggingface.co/OrionStarAI/Orion-14B-Base/blob/main/LICENSE
 """Inference-only Orion-14B model compatible with HuggingFace weights."""

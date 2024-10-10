@@ -1,5 +1,6 @@
 # coding=utf-8
 # Copyright 2023 The vLLM team.
+# Copyright (c) 2024 - 2024 Moore Threads Technology Co., Ltd("Moore Threads"). All rights reserved.
 # Copyright (c) Google Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

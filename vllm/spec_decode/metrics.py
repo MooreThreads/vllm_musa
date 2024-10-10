@@ -76,7 +76,7 @@ class AsyncMetricsCollector:
 
     def init_gpu_tensors(self, rank: int) -> None:
         self._rank = rank
-        self._copy_stream = torch.cuda.Stream()
+        self._copy_stream = torch.musa.Stream()
 
     def maybe_collect_rejsample_metrics(
             self, k: int) -> Optional[SpecDecodeWorkerMetrics]:
@@ -113,9 +113,9 @@ class AsyncMetricsCollector:
         Returns a CUDA event recording when the copy is complete.
         """
         assert self._copy_stream is not None
-        self._copy_stream.wait_stream(torch.cuda.current_stream())
+        self._copy_stream.wait_stream(torch.musa.current_stream())
 
-        with torch.cuda.stream(self._copy_stream):
+        with torch.musa.stream(self._copy_stream):
             self._aggregate_num_accepted_tokens.copy_(
                 self._rejection_sampler.num_accepted_tokens, non_blocking=True)
             self._aggregate_num_emitted_tokens.copy_(
@@ -125,7 +125,7 @@ class AsyncMetricsCollector:
             self._aggregate_num_draft_tokens = (
                 self._rejection_sampler.num_draft_tokens)
 
-        aggregate_metrics_ready = torch.cuda.Event()
+        aggregate_metrics_ready = torch.musa.Event()
         aggregate_metrics_ready.record(self._copy_stream)
 
         return aggregate_metrics_ready

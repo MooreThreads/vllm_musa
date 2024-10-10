@@ -1,12 +1,14 @@
 # Copyright 2023 The vLLM team.
 # Adapted from
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/parallel_state.py
+# Copyright (c) 2024 - 2024 Moore Threads Technology Co., Ltd("Moore Threads"). All rights reserved.
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 """Tensor and pipeline parallel groups."""
 import contextlib
 from typing import Optional
 
 import torch
+import torch_musa
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -301,10 +303,10 @@ def destroy_model_parallel():
     _PIPELINE_MODEL_PARALLEL_GROUP = None
     global _PIPELINE_GLOBAL_RANKS
     _PIPELINE_GLOBAL_RANKS = None
-    from vllm.distributed.device_communicators import pynccl_utils
+    from vllm.distributed.device_communicators import pymccl_utils
 
     # Destroy the pynccl states if any.
-    pynccl_utils.destroy_process_group()
+    pymccl_utils.destroy_process_group()
 
 
 # Whether to use pynccl for nccl all reduce.
@@ -315,7 +317,7 @@ _ENABLE_PYNCCL_FOR_ALL_REDUCE = False
 
 @contextlib.contextmanager
 def with_pynccl_for_all_reduce():
-    from vllm.distributed.device_communicators import pynccl_utils
+    from vllm.distributed.device_communicators import pymccl_utils
     """use pynccl instead of torch.distributed for all reduce"""
     tp_size = get_tensor_model_parallel_world_size()
     if tp_size == 1:
@@ -327,8 +329,8 @@ def with_pynccl_for_all_reduce():
         old = _ENABLE_PYNCCL_FOR_ALL_REDUCE
         _ENABLE_PYNCCL_FOR_ALL_REDUCE = True
 
-        stream = torch.cuda.current_stream()
-        with pynccl_utils.set_pynccl_stream(stream):
+        stream = torch.musa.current_stream()
+        with pymccl_utils.set_pymccl_stream(stream):
             yield
         _ENABLE_PYNCCL_FOR_ALL_REDUCE = old
 

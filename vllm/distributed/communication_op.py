@@ -23,7 +23,7 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     TLDR: always assume this function modifies its input, but use the return
     value as the output.
     """
-    from vllm.distributed.device_communicators import pynccl_utils
+    from vllm.distributed.device_communicators import pymccl_utils
     from vllm.distributed.device_communicators.custom_all_reduce import (
         custom_all_reduce)
 
@@ -34,7 +34,7 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     if out is not None:
         return out
     if is_pynccl_enabled_for_all_reduce():
-        pynccl_utils.all_reduce(input_)
+        pymccl_utils.all_reduce(input_)
     else:
         torch.distributed.all_reduce(input_,
                                      group=get_tensor_model_parallel_group())
@@ -156,9 +156,9 @@ def _split_tensor_dict(
             # tensors on cuda. In the future, we can add device as a field in
             # TensorMetadata to support broadcasting tensors on different
             # devices.
-            assert value.is_cuda, (
-                f"Tensor {key}: {value} is not on cuda. Currently we only "
-                f"support broadcasting tensors on cuda.")
+            assert value.is_musa, (
+                f"Tensor {key}: {value} is not on musa. Currently we only "
+                f"support broadcasting tensors on musa.")
             metadata_list.append((key, TensorMetadata(value.dtype,
                                                       value.size())))
             tensor_list.append(value)
@@ -223,7 +223,7 @@ def broadcast_tensor_dict(
             if isinstance(value, TensorMetadata):
                 tensor = torch.empty(value.size,
                                      dtype=value.dtype,
-                                     device="cuda")
+                                     device="musa")
                 async_handle = torch.distributed.broadcast(tensor,
                                                            src=src,
                                                            async_op=True,

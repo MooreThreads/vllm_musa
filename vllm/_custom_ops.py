@@ -3,8 +3,8 @@ from typing import Dict, Optional, Tuple
 import torch
 
 try:
-    from vllm._C import cache_ops as vllm_cache_ops
-    from vllm._C import ops as vllm_ops
+    from vllm_C import cache_ops as vllm_cache_ops
+    from vllm_C import ops as vllm_ops
 except ImportError:
     pass
 

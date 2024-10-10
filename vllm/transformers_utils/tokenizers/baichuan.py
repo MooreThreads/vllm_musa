@@ -2,6 +2,7 @@
 # https://huggingface.co/baichuan-inc/Baichuan2-13B-Chat/blob/8f6e343d545c503b91429582231d1d354dac2740/tokenization_baichuan.py
 # This includes a fix suggested in
 # https://github.com/vllm-project/vllm/issues/1403#issuecomment-1767503058
+# Copyright (c) 2024 - 2024 Moore Threads Technology Co., Ltd("Moore Threads"). All rights reserved.
 # Copyright (c) 2023, Baichuan Intelligent Technology. All rights reserved.
 
 import os

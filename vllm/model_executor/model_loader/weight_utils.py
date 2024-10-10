@@ -290,7 +290,7 @@ def pt_weights_iterator(
         for name, param in state.items():
             yield name, param
         del state
-        torch.cuda.empty_cache()
+        torch.musa.empty_cache()
 
 
 def kv_cache_scales_loader(

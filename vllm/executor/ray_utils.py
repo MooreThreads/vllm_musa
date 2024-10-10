@@ -35,7 +35,7 @@ try:
             """Used only when compiled DAG is enabled."""
             import torch
             if not self.compiled_dag_cuda_device_set:
-                torch.cuda.set_device(self.worker.device)
+                torch.musa.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
 
             output = self.worker.execute_model()

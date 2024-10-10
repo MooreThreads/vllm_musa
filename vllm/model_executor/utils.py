@@ -12,6 +12,8 @@ def set_random_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    elif torch.musa.is_available():
+        torch.musa.manual_seed_all(seed)
 
 
 def set_weight_attrs(

@@ -1,6 +1,7 @@
 # Copyright 2023 The vLLM team.
 # Adapted from
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/tensor_parallel/utils.py
+# Copyright (c) 2024 - 2024 Moore Threads Technology Co., Ltd("Moore Threads"). All rights reserved.
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 import json
 import os
@@ -62,8 +63,8 @@ def split_tensor_along_last_dim(
 # https://github.com/turboderp/exllamav2/blob/1c67f97f3d2a968605a9c31ab791a05c85bb7879/exllamav2/compat.py#L10
 # License: MIT
 def _can_actually_p2p(idx_a, idx_b):
-    dev_i = f"cuda:{idx_a}"
-    dev_j = f"cuda:{idx_b}"
+    dev_i = f"musa:{idx_a}"
+    dev_j = f"musa:{idx_b}"
     a = torch.randn(5, device=dev_i) + 123.0
     b = a.to(dev_j)
     c = b.to(dev_i)
@@ -102,7 +103,7 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
 
     is_distributed = dist.is_initialized()
 
-    num_dev = torch.cuda.device_count()
+    num_dev = torch.musa.device_count()
     cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
     if cuda_visible_devices is None:
         cuda_visible_devices = ",".join(str(i) for i in range(num_dev))
@@ -122,7 +123,7 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
                 # on some platforms, P2P support might be buggy and we need
                 # additional checks. See also:
                 # https://github.com/vllm-project/vllm/issues/2728
-                cache[f"{_i}->{_j}"] = torch.cuda.can_device_access_peer(
+                cache[f"{_i}->{_j}"] = torch.musa.can_device_access_peer(
                     _i, _j) and _can_actually_p2p(_i, _j)
         with open(path, "w") as f:
             json.dump(cache, f, indent=4)

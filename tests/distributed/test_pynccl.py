@@ -3,7 +3,7 @@ import multiprocessing
 import pytest
 import torch
 
-import vllm.distributed.device_communicators.pynccl_utils as pynccl_utils
+import vllm.distributed.device_communicators.pymccl_utils as pymccl_utils
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.device_communicators.pynccl import (NCCLCommunicator,
                                                           ncclGetUniqueId)
@@ -97,7 +97,7 @@ def multiple_tp_with_vllm_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
     torch.cuda.set_device(torch.distributed.get_rank())
     ensure_model_parallel_initialized(2, 2)
-    pynccl_utils.init_process_group(
+    pymccl_utils.init_process_group(
         group=get_tensor_model_parallel_cpu_group())
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
     with with_pynccl_for_all_reduce():

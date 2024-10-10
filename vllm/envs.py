@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "spawn"
-    VLLM_TARGET_DEVICE: str = "cuda"
+    VLLM_TARGET_DEVICE: str = "musa"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_BUILD_WITH_NEURON: bool = False

@@ -2,6 +2,7 @@
 # Adapted from
 # https://huggingface.co/Qwen/Qwen-7B/blob/main/modeling_qwen.py
 # Copyright (c) Alibaba Cloud.
+# Copyright (c) 2024 - 2024 Moore Threads Technology Co., Ltd("Moore Threads"). All rights reserved.
 # LICENSE: https://huggingface.co/Qwen/Qwen-7B/blob/main/LICENSE
 """Inference-only QWen model compatible with HuggingFace weights."""
 from typing import Any, Dict, Iterable, List, Optional, Tuple

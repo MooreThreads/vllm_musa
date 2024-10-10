@@ -1,5 +1,6 @@
 # coding=utf-8
 # Copyright 2023 The OpenAI Team Authors and HuggingFace Inc. team.
+# Copyright (c) 2024 - 2024 Moore Threads Technology Co., Ltd("Moore Threads"). All rights reserved.
 # Copyright (c) 2018, NVIDIA CORPORATION.  All rights reserved.
 # Copyright 2023 Cerebras Systems.
 #
