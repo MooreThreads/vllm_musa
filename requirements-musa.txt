@@ -1,0 +1,7 @@
+# Common dependencies
+-r requirements-common.txt
+
+# Dependencies for MTHREADS GPUs
+ray >= 2.9
+torch == 2.2.0
+triton >= 2.2.0  # FIXME(woosuk): This is a hack to avoid import error.

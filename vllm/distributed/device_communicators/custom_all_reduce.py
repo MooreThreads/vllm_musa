@@ -10,7 +10,7 @@ from vllm.logger import init_logger
 try:
     import pynvml
 
-    from vllm._C import custom_ar
+    from vllm_C import custom_ar
 except ImportError:
     # For AMD GPUs
     custom_ar = None
@@ -43,7 +43,7 @@ def init_custom_ar() -> None:
             " disable_custom_all_reduce=True explicitly.", world_size,
             str(_SUPPORTED_WORLD_SIZES))
         return
-    num_dev = torch.cuda.device_count()
+    num_dev = torch.musa.device_count()
     # note: num dev can be larger than world_size if we're only using
     # first few GPUs
     if num_dev < world_size:
@@ -196,10 +196,10 @@ class CustomAllreduce:
         # allreduce results.
         self.meta = torch.zeros(custom_ar.meta_size() + max_size,
                                 dtype=torch.uint8,
-                                device="cuda")
+                                device="musa")
         # This is a pre-registered IPC buffer. In eager mode, input tensors
         # are first copied into this buffer before allreduce is performed
-        self.buffer = torch.empty(max_size, dtype=torch.uint8, device="cuda")
+        self.buffer = torch.empty(max_size, dtype=torch.uint8, device="musa")
         # This is a buffer for storing the tuples of pointers pointing to
         # IPC buffers from all ranks. Each registered tuple has size of
         # 8*world_size bytes where world_size is at most 8. Allocating 8MB
@@ -207,7 +207,7 @@ class CustomAllreduce:
         # needs less than 10000 of registered tuples.
         self.rank_data = torch.empty(8 * 1024 * 1024,
                                      dtype=torch.uint8,
-                                     device="cuda")
+                                     device="musa")
         self.max_size = max_size
         self.world_size = world_size
         handles, offsets = self._get_ipc_meta(self.meta)

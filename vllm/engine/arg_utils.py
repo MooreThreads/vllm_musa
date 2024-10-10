@@ -406,7 +406,7 @@ class EngineArgs:
         parser.add_argument("--device",
                             type=str,
                             default=EngineArgs.device,
-                            choices=["auto", "cuda", "neuron", "cpu"],
+                            choices=["auto", "cuda", "neuron", "cpu", "musa"],
                             help='Device type for vLLM execution.')
         # Related to Vision-language models such as llava
         parser.add_argument(

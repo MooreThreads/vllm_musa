@@ -9,10 +9,14 @@ from shutil import which
 from typing import Dict, List
 
 import torch
+import torch_musa
 from packaging.version import Version, parse
 from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
 from torch.utils.cpp_extension import CUDA_HOME
+
+from torch_musa.utils.simple_porting import SimplePorting
+from torch_musa.utils.musa_extension import BuildExtension, MUSAExtension
 
 
 def load_module_from_path(module_name, path):
@@ -25,6 +29,7 @@ def load_module_from_path(module_name, path):
 
 ROOT_DIR = os.path.dirname(__file__)
 logger = logging.getLogger(__name__)
+
 
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
@@ -63,6 +68,24 @@ class CMakeExtension(Extension):
         super().__init__(name, sources=[], **kwa)
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
+ext_modules = []
+ext_modules.append(
+        MUSAExtension(
+            name="vllm_C",
+            sources=[
+                "csrc_musa/cache_kernels.mu",
+                "csrc_musa/attention/attention_kernels.mu",
+                "csrc_musa/pos_encoding_kernels.mu",
+                "csrc_musa/activation_kernels.mu",
+                "csrc_musa/layernorm_kernels.mu",
+                "csrc_musa/musa_utils_kernels.mu",
+                "csrc_musa/moe_align_block_size_kernels.mu",
+                "csrc_musa/pybind.cpp",
+                "csrc_musa/custom_all_reduce.mu",
+            ],
+            extra_compile_args= {"cxx": ['-O3', '-std=c++17'],}
+        )
+    )
 
 class cmake_build_ext(build_ext):
     # A dict of extension directories that have been configured.
@@ -87,20 +110,6 @@ class cmake_build_ext(build_ext):
                 num_jobs = os.cpu_count()
 
         nvcc_threads = None
-        if _is_cuda() and get_nvcc_cuda_version() >= Version("11.2"):
-            # `nvcc_threads` is either the value of the NVCC_THREADS
-            # environment variable (if defined) or 1.
-            # when it is set, we reduce `num_jobs` to avoid
-            # overloading the system.
-            nvcc_threads = envs.NVCC_THREADS
-            if nvcc_threads is not None:
-                nvcc_threads = int(nvcc_threads)
-                logger.info(
-                    "Using NVCC_THREADS=%d as the number of nvcc threads.",
-                    nvcc_threads)
-            else:
-                nvcc_threads = 1
-            num_jobs = max(1, num_jobs // nvcc_threads)
 
         return num_jobs, nvcc_threads
 
@@ -133,6 +142,7 @@ class cmake_build_ext(build_ext):
         ]
 
         verbose = envs.VERBOSE
+        # verbose = False
         if verbose:
             cmake_args += ['-DCMAKE_VERBOSE_MAKEFILE=ON']
 
@@ -206,6 +216,10 @@ def _is_cuda() -> bool:
     return VLLM_TARGET_DEVICE == "cuda" \
             and torch.version.cuda is not None \
             and not _is_neuron()
+            
+def _is_musa() -> bool:
+    return VLLM_TARGET_DEVICE == "musa" \
+            and torch.version.musa is not None
 
 
 def _is_hip() -> bool:
@@ -271,7 +285,7 @@ def get_neuronxcc_version():
         raise RuntimeError("Could not find HIP version in the output")
 
 
-def get_nvcc_cuda_version() -> Version:
+def get_mcc_musa_version() -> Version:
     """Get the CUDA version from nvcc.
 
     Adapted from https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
@@ -306,10 +320,12 @@ def get_vllm_version() -> str:
     version = find_version(get_path("vllm", "__init__.py"))
 
     if _is_cuda():
-        cuda_version = str(get_nvcc_cuda_version())
+        cuda_version = str(get_mcc_musa_version())
         if cuda_version != MAIN_CUDA_VERSION:
             cuda_version_str = cuda_version.replace(".", "")[:3]
             version += f"+cu{cuda_version_str}"
+    elif _is_musa():   
+        version += "+musa"
     elif _is_hip():
         # Get the HIP version
         hipcc_version = get_hipcc_rocm_version()
@@ -364,6 +380,8 @@ def get_requirements() -> List[str]:
             else:
                 modified_requirements.append(req)
         requirements = modified_requirements
+    elif _is_musa():
+        requirements = _read_requirements("requirements-musa.txt")
     elif _is_hip():
         requirements = _read_requirements("requirements-rocm.txt")
     elif _is_neuron():
@@ -376,23 +394,23 @@ def get_requirements() -> List[str]:
     return requirements
 
 
-ext_modules = []
+# ext_modules = []
 
-if _is_cuda():
-    ext_modules.append(CMakeExtension(name="vllm._moe_C"))
+# if _is_cuda() or _is_musa():
+#     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
 
-    if _install_punica():
-        ext_modules.append(CMakeExtension(name="vllm._punica_C"))
+#     if _install_punica():
+#         ext_modules.append(CMakeExtension(name="vllm._punica_C"))
 
-if not _is_neuron():
-    ext_modules.append(CMakeExtension(name="vllm._C"))
+# if not _is_neuron():
+#     ext_modules.append(CMakeExtension(name="vllm._C"))
 
 package_data = {
     "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
 }
-if envs.VLLM_USE_PRECOMPILED:
-    ext_modules = []
-    package_data["vllm"].append("*.so")
+# if envs.VLLM_USE_PRECOMPILED:
+#     ext_modules = []
+#     package_data["vllm"].append("*.so")
 
 setup(
     name="vllm",
@@ -424,6 +442,6 @@ setup(
     extras_require={
         "tensorizer": ["tensorizer==2.9.0"],
     },
-    cmdclass={"build_ext": cmake_build_ext} if not _is_neuron() else {},
+    cmdclass={"build_ext": BuildExtension} if ext_modules else {},
     package_data=package_data,
 )

@@ -3,6 +3,7 @@
 # https://huggingface.co/microsoft/phi-1_5/blob/main/modeling_phi.py
 # Copyright 2023 The vLLM team.
 # Copyright (c) Microsoft Corporation.
+# Copyright (c) 2024 - 2024 Moore Threads Technology Co., Ltd("Moore Threads"). All rights reserved.
 # Licensed under the MIT license.
 #
 # BSD 3-Clause License

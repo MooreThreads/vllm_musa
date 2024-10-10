@@ -4,6 +4,7 @@ import os
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
+import torch_musa
 import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
@@ -13,7 +14,7 @@ from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               get_tensor_model_parallel_cpu_group,
                               init_distributed_environment)
-from vllm.distributed.device_communicators import pynccl_utils
+from vllm.distributed.device_communicators import pymccl_utils
 from vllm.distributed.device_communicators.custom_all_reduce import (
     init_custom_ar)
 from vllm.lora.request import LoRARequest
@@ -69,7 +70,7 @@ class Worker(WorkerBase):
         if self.vision_language_config:
             assert not self.lora_config, (
                 "To be tested: vision language model with LoRA settings.")
-
+            
         self.model_runner = ModelRunner(
             model_config,
             parallel_config,
@@ -104,13 +105,27 @@ class Worker(WorkerBase):
             _check_if_gpu_supports_dtype(self.model_config.dtype)
             torch.cuda.empty_cache()
             self.init_gpu_memory = torch.cuda.mem_get_info()[0]
+        elif self.device_config.device.type == "musa":
+            os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
+            os.environ["TORCH_MCCL_AVOID_RECORD_STREAMS"] = "1"
+
+            # This env var set by Ray causes exceptions with graph building.
+            os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
+            os.environ.pop("MCCL_ASYNC_ERROR_HANDLING", None)
+            self.device = torch.device(f"musa:{self.local_rank}")
+            torch.musa.set_device(self.device)
+
+            _check_if_gpu_supports_dtype(self.model_config.dtype)
+            torch.musa.empty_cache()
+            self.init_gpu_memory = torch.musa.mem_get_info()[0]
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
         init_worker_distributed_environment(self.parallel_config, self.rank,
                                             self.distributed_init_method,
-                                            self.local_rank)
+                                            self.local_rank,
+                                            backend="mccl")
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -132,7 +147,7 @@ class Worker(WorkerBase):
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
-        torch.cuda.empty_cache()
+        torch.musa.empty_cache()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -140,8 +155,8 @@ class Worker(WorkerBase):
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
-        torch.cuda.synchronize()
-        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+        torch.musa.synchronize()
+        free_gpu_memory, total_gpu_memory = torch.musa.mem_get_info()
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
         peak_memory = self.init_gpu_memory - free_gpu_memory
@@ -283,16 +298,17 @@ def init_worker_distributed_environment(
     rank: int,
     distributed_init_method: Optional[str] = None,
     local_rank: int = -1,
+    backend: str = "nccl",
 ) -> None:
     """Initialize the distributed environment."""
     init_distributed_environment(parallel_config.world_size, rank,
-                                 distributed_init_method, local_rank)
+                                 distributed_init_method, local_rank, backend)
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 
-    if pynccl_utils.is_initialized():
-        pynccl_world_size = pynccl_utils.get_world_size()
+    if pymccl_utils.is_initialized():
+        pynccl_world_size = pymccl_utils.get_world_size()
         if pynccl_world_size != parallel_config.world_size:
             raise RuntimeError(
                 "pynccl is already initialized but the pynccl world "
@@ -302,7 +318,7 @@ def init_worker_distributed_environment(
         # NOTE(woosuk): We don't initialize pynccl process group when world size
         # is 1.
         # NOTE(kaichao): By default, pynccl is initialized for tp group.
-        pynccl_utils.init_process_group(
+        pymccl_utils.init_process_group(
             group=get_tensor_model_parallel_cpu_group())
 
     # Initialize a custom fast all-reduce implementation.
@@ -310,9 +326,14 @@ def init_worker_distributed_environment(
         init_custom_ar()
 
     # A small all_reduce for warmup.
-    torch.distributed.all_reduce(torch.zeros(1).cuda())
-    if pynccl_utils.is_initialized():
-        pynccl_utils.all_reduce(torch.zeros(1).cuda())
+    if backend == "mccl":
+        torch.distributed.all_reduce(torch.zeros(1).musa())
+        if pymccl_utils.is_initialized():
+            pymccl_utils.all_reduce(torch.zeros(1).musa())
+    else:
+        torch.distributed.all_reduce(torch.zeros(1).cuda())
+        if pymccl_utils.is_initialized():
+            pymccl_utils.all_reduce(torch.zeros(1).cuda())
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):

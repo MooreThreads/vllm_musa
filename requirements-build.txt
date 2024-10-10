@@ -3,5 +3,6 @@ cmake>=3.21
 ninja
 packaging
 setuptools>=49.4.0
-torch==2.3.0
+torch==2.2.0
 wheel
+triton >= 2.2.0  # FIXME(woosuk): This is a hack to avoid import error.

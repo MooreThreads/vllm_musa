@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
 
 import torch
+import torch_musa
 from torch.nn.functional import scaled_dot_product_attention
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -50,8 +51,7 @@ class TorchSDPABackend(AttentionBackend):
 
 
 @dataclass
-class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata,
-                        AttentionMetadataPerStage):
+class TorchSDPAMetadata(PagedAttentionMetadata, AttentionMetadata):
     """Metadata for TorchSDPABackend.
     """
     # Currently, input sequences can only contain all prompts
@@ -125,6 +125,10 @@ class TorchSDPABackendImpl(AttentionImpl):
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
+        
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_math_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
 
         if kv_cache is not None:
             key_cache, value_cache = PagedAttention.split_kv_cache(
@@ -134,7 +138,6 @@ class TorchSDPABackendImpl(AttentionImpl):
                                                 attn_metadata.slot_mapping,
                                                 attn_metadata.kv_cache_dtype,
                                                 kv_scale)
-
         if attn_metadata.is_prompt:
             assert attn_metadata.seq_lens is not None
             if (kv_cache is None or attn_metadata.block_tables.numel() == 0):
@@ -150,32 +153,32 @@ class TorchSDPABackendImpl(AttentionImpl):
                             attn_metadata.seq_lens)  # type: ignore
                     elif self.sliding_window is not None:
                         att_masks = _make_sliding_window_bias(
-                            attn_metadata.seq_lens, self.sliding_window,
+                            attn_metadata.prefill_metadata.seq_lens, self.sliding_window,
                             query.dtype)  # type: ignore
                     else:
-                        att_masks = [None] * len(attn_metadata.seq_lens)
-                    attn_metadata.attn_bias = att_masks
+                        att_masks = [None] * len(attn_metadata.prefill_metadata.seq_lens)
+                    attn_metadata.prefill_metadata.attn_bias = att_masks
 
-                query = query.movedim(0, query.dim() - 2)
-                key = key.movedim(0, key.dim() - 2)
-                value = value.movedim(0, value.dim() - 2)
+                query = query.movedim(0, query.dim() - 2).unsqueeze(0)
+                key = key.movedim(0, key.dim() - 2).unsqueeze(0)
+                value = value.movedim(0, value.dim() - 2).unsqueeze(0)
 
                 start = 0
                 output = torch.empty(
-                    (num_tokens, self.num_heads, self.head_size),
+                    (1, num_tokens, self.num_heads, self.head_size),
                     dtype=query.dtype)
-                for seq_len, mask in zip(attn_metadata.seq_lens,
-                                         attn_metadata.attn_bias):
+                for seq_len, mask in zip(attn_metadata.prefill_metadata.seq_lens,
+                                         attn_metadata.prefill_metadata.attn_bias):
                     end = start + seq_len
                     sub_out = scaled_dot_product_attention(
-                        query[:, start:end, :],
-                        key[:, start:end, :],
-                        value[:, start:end, :],
+                        query[:, :, start:end, :],
+                        key[:, :, start:end, :],
+                        value[:, :, start:end, :],
                         attn_mask=mask,
                         dropout_p=0.0,
                         is_causal=not self.need_mask,
                         scale=self.scale).movedim(query.dim() - 2, 0)
-                    output[start:end, :, :] = sub_out
+                    output[start:end, :, :] = sub_out[0]
                     start = end
             else:
                 # prefix-enabled attention

@@ -7,7 +7,7 @@ import torch
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
-from vllm.utils import is_cpu, is_hip
+from vllm.utils import is_cpu, is_hip, is_musa
 
 logger = init_logger(__name__)
 
@@ -55,6 +55,9 @@ def _which_attn_to_use(dtype: torch.dtype) -> _Backend:
     """Returns which flash attention backend to use."""
     if is_cpu():
         return _Backend.TORCH_SDPA
+    
+    if is_musa():
+        return _Backend.FLASH_ATTN
 
     if is_hip():
         # AMD GPUs.

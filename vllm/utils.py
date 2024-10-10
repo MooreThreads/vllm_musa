@@ -124,6 +124,8 @@ class LRUCache(Generic[T]):
 def is_hip() -> bool:
     return torch.version.hip is not None
 
+def is_musa() -> bool:
+    return torch.version.musa is not None
 
 @lru_cache(maxsize=None)
 def is_cpu() -> bool:
@@ -147,11 +149,11 @@ def is_neuron() -> bool:
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     # NOTE: This import statement should be executed lazily since
-    # the Neuron-X backend does not have the `cuda_utils` module.
-    from vllm._C import cuda_utils
+    # the Neuron-X backend does not have the `musa_utils` module.
+    from vllm_C import musa_utils
 
     max_shared_mem = (
-        cuda_utils.get_max_shared_memory_per_block_device_attribute(gpu))
+        musa_utils.get_max_shared_memory_per_block_device_attribute(gpu))
     # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
     # will fail
     assert max_shared_mem > 0, "max_shared_mem can not be zero"
@@ -315,24 +317,24 @@ def cdiv(a: int, b: int) -> int:
 
 
 @lru_cache(maxsize=None)
-def get_nvcc_cuda_version() -> Optional[Version]:
-    cuda_home = envs.CUDA_HOME
-    if not cuda_home:
-        cuda_home = '/usr/local/cuda'
-        if os.path.isfile(cuda_home + '/bin/nvcc'):
+def get_mcc_musa_version() -> Optional[Version]:
+    musa_home = envs.MUSA_HOME
+    if not musa_home:
+        musa_home = '/usr/local/musa'
+        if os.path.isfile(musa_home + '/bin/nvcc'):
             logger.info(
-                'CUDA_HOME is not found in the environment. '
-                'Using %s as CUDA_HOME.', cuda_home)
+                'MUSA_HOME is not found in the environment. '
+                'Using %s as MUSA_HOME.', musa_home)
         else:
-            logger.warning('Not found nvcc in %s. Skip cuda version check!',
-                           cuda_home)
+            logger.warning('Not found nvcc in %s. Skip musa version check!',
+                           musa_home)
             return None
-    nvcc_output = subprocess.check_output([cuda_home + "/bin/nvcc", "-V"],
+    mcc_output = subprocess.check_output([musa_home + "/bin/mcc", "-V"],
                                           universal_newlines=True)
-    output = nvcc_output.split()
+    output = mcc_output.split()
     release_idx = output.index("release") + 1
-    nvcc_cuda_version = parse(output[release_idx].split(",")[0])
-    return nvcc_cuda_version
+    mcc_musa_version = parse(output[release_idx].split(",")[0])
+    return mcc_musa_version
 
 
 def _generate_random_fp8(
@@ -388,12 +390,14 @@ def create_kv_caches_with_random_flash(
     cache_dtype: Optional[Union[str, torch.dtype]],
     model_dtype: Optional[Union[str, torch.dtype]] = None,
     seed: int = 0,
-    device: Optional[str] = "cuda",
+    device: Optional[str] = "musa",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
     assert cache_dtype != "fp8"
     torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    if torch.musa.is_available():
+        torch.musa.manual_seed(seed)
+    elif torch.musa.is_available():
+        torch.musa.manual_seed(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     key_value_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
@@ -418,11 +422,11 @@ def create_kv_caches_with_random(
     cache_dtype: Optional[Union[str, torch.dtype]],
     model_dtype: Optional[Union[str, torch.dtype]] = None,
     seed: int = 0,
-    device: Optional[str] = "cuda",
+    device: Optional[str] = "musa",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
     torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    if torch.musa.is_available():
+        torch.musa.manual_seed(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
 
@@ -470,7 +474,7 @@ def is_pin_memory_available() -> bool:
 
     if in_wsl():
         # Pinning memory in WSL is not supported.
-        # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
+        # https://docs.nvidia.com/musa/wsl-user-guide/index.html#known-limitations-for-linux-musa-applications
         print_warning_once("Using 'pin_memory=False' as WSL is detected. "
                            "This may slow down the performance.")
         return False
@@ -489,8 +493,8 @@ class CudaMemoryProfiler:
 
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
-        torch.cuda.reset_peak_memory_stats(self.device)
-        mem = torch.cuda.max_memory_allocated(self.device)
+        torch.musa.reset_peak_memory_stats(self.device)
+        mem = torch.musa.max_memory_allocated(self.device)
         return mem
 
     def __enter__(self):
@@ -603,6 +607,26 @@ def nccl_integrity_check(filepath):
     assert result == 0
     return version.value
 
+def mccl_integrity_check(filepath):
+    """
+    when the library is corrupted, we cannot catch
+    the exception in python. it will crash the process.
+    instead, we use the exit code of `ldd` to check
+    if the library is corrupted. if not, we will return
+    the version of the library.
+    """
+    exit_code = os.system(f"ldd {filepath} 2>&1 > /dev/null")
+    if exit_code != 0:
+        raise RuntimeError(f"Failed to load MCCL library from {filepath} .")
+    import ctypes
+
+    mccl = ctypes.CDLL(filepath)
+    version = ctypes.c_int()
+    mccl.mcclGetVersion.restype = ctypes.c_int
+    mccl.mcclGetVersion.argtypes = [ctypes.POINTER(ctypes.c_int)]
+    result = mccl.mcclGetVersion(ctypes.byref(version))
+    assert result == 0
+    return version.value
 
 @lru_cache(maxsize=None)
 def find_library(lib_name: str) -> str:
@@ -638,8 +662,8 @@ def find_nccl_library():
 
     # check if we have vllm-managed nccl
     vllm_nccl_path = None
-    if torch.version.cuda is not None:
-        cuda_major = torch.version.cuda.split(".")[0]
+    if torch.version.musa is not None:
+        cuda_major = torch.version.musa.split(".")[0]
         path = os.path.expanduser(
             f"{VLLM_CONFIG_ROOT}/vllm/nccl/cu{cuda_major}/libnccl.so.*")
         files = glob.glob(path)
@@ -651,13 +675,40 @@ def find_nccl_library():
             "Found nccl from environment variable VLLM_NCCL_SO_PATH=%s",
             so_file)
     else:
-        if torch.version.cuda is not None:
+        if torch.version.musa is not None:
             so_file = vllm_nccl_path or find_library("libnccl.so.2")
         elif torch.version.hip is not None:
             so_file = find_library("librccl.so.1")
         else:
             raise ValueError("NCCL only supports CUDA and ROCm backends.")
         logger.info("Found nccl from library %s", so_file)
+    return so_file
+
+def find_mccl_library():
+    so_file = envs.VLLM_NCCL_SO_PATH
+    VLLM_CONFIG_ROOT = envs.VLLM_CONFIG_ROOT
+
+    # check if we have vllm-managed nccl
+    vllm_mccl_path = None
+    if torch.version.musa is not None:
+        path = os.path.expanduser(
+            f"{VLLM_CONFIG_ROOT}/vllm/nccl/libmccl.so.*")
+        files = glob.glob(path)
+        vllm_nccl_path = files[0] if files else None
+
+    # manually load the nccl library
+    if so_file:
+        logger.info(
+            "Found nccl from environment variable VLLM_NCCL_SO_PATH=%s",
+            so_file)
+    else:
+        if torch.version.musa is not None:
+            so_file = find_library("libmccl.so.2")
+        elif torch.version.hip is not None:
+            so_file = find_library("librccl.so.1")
+        else:
+            raise ValueError("NCCL only supports CUDA and ROCm backends.")
+        logger.info("Found mccl from library %s", so_file)
     return so_file
 
 

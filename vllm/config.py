@@ -11,7 +11,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
 from vllm.transformers_utils.config import get_config, get_hf_text_config
-from vllm.utils import (get_cpu_memory, get_nvcc_cuda_version, is_cpu, is_hip,
+from vllm.utils import (get_cpu_memory, get_mcc_musa_version, is_cpu, is_hip,
                         is_neuron)
 
 GPTQMarlinConfig = get_quantization_config("gptq_marlin")
@@ -370,7 +370,7 @@ class CacheConfig:
             pass
         elif self.cache_dtype == "fp8":
             if not is_hip():
-                nvcc_cuda_version = get_nvcc_cuda_version()
+                nvcc_cuda_version = get_mcc_musa_version()
                 if nvcc_cuda_version is not None \
                         and nvcc_cuda_version < Version("11.8"):
                     raise ValueError(

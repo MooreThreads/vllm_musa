@@ -5,6 +5,7 @@ from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
 import numpy as np
 import torch
+import torch_musa
 import torch.nn as nn
 
 from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
@@ -14,7 +15,7 @@ from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict, with_pynccl_for_all_reduce
 from vllm.distributed.device_communicators import (custom_all_reduce,
-                                                   pynccl_utils)
+                                                   pymccl_utils)
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -160,20 +161,19 @@ class ModelRunner:
         self.flashinfer_workspace_buffer: torch.Tensor
 
     def load_model(self) -> None:
-        with CudaMemoryProfiler() as m:
-            self.model = get_model(
-                model_config=self.model_config,
-                device_config=self.device_config,
-                load_config=self.load_config,
-                lora_config=self.lora_config,
-                vision_language_config=self.vision_language_config,
-                parallel_config=self.parallel_config,
-                scheduler_config=self.scheduler_config,
-            )
+        self.model = get_model(
+            model_config=self.model_config,
+            device_config=self.device_config,
+            load_config=self.load_config,
+            lora_config=self.lora_config,
+            vision_language_config=self.vision_language_config,
+            parallel_config=self.parallel_config,
+            scheduler_config=self.scheduler_config,
+        )
 
-        self.model_memory_usage = m.consumed_memory
-        logger.info("Loading model weights took %.4f GB",
-                    self.model_memory_usage / float(2**30))
+        # self.model_memory_usage = m.consumed_memory
+        # logger.info("Loading model weights took %.4f GB",
+        #             self.model_memory_usage / float(2**30))
 
         if self.lora_config:
             assert hasattr(self.model, "supported_lora_modules"
@@ -375,16 +375,16 @@ class ModelRunner:
                                          dtype=torch.long,
                                          device=self.device)
         subquery_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
-                                         dtype=torch.int32,
+                                         dtype=torch.long,
                                          device=self.device)
 
         seq_lens_tensor = torch.tensor(seq_lens,
                                        dtype=torch.int,
                                        device=self.device)
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
-                                    dtype=torch.int32,
+                                    dtype=torch.long,
                                     device=self.device)
-
+        
         torch.cumsum(query_lens_tensor,
                      dim=0,
                      dtype=subquery_start_loc.dtype,
@@ -394,7 +394,9 @@ class ModelRunner:
                      dim=0,
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
-
+        subquery_start_loc = subquery_start_loc.int()
+        seq_start_loc = seq_start_loc.int()
+        
         if self.attn_backend is FlashInferBackend:
             attn_metadata = self.attn_backend.make_metadata(
                 is_prompt=True,
@@ -512,9 +514,10 @@ class ModelRunner:
         # For decoding requests, batch_size == input_tokens.
         batch_size = len(input_tokens)
         max_seq_len = max(seq_lens)
-        use_captured_graph = (not self.model_config.enforce_eager
-                              and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
-                              and max_seq_len <= self.max_seq_len_to_capture)
+        # use_captured_graph = (not self.model_config.enforce_eager
+        #                       and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
+        #                       and max_seq_len <= self.max_seq_len_to_capture)
+        use_captured_graph = False
         if use_captured_graph:
             graph_batch_size = _get_graph_batch_size(batch_size)
             assert graph_batch_size >= batch_size
@@ -593,8 +596,8 @@ class ModelRunner:
                 is_prompt=False,
                 seq_lens=None,
                 seq_lens_tensor=seq_lens_tensor,
-                max_query_len=None,
                 max_seq_len=max_seq_len,
+                max_query_len=None,
                 subquery_start_loc=None,
                 seq_start_loc=None,
                 context_lens_tensor=None,
@@ -886,7 +889,7 @@ class ModelRunner:
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
         self.execute_model(seqs, kv_caches)
-        torch.cuda.synchronize()
+        torch.musa.synchronize()
         return
 
     def remove_all_loras(self):
@@ -931,7 +934,7 @@ class ModelRunner:
         """
         # NOTE(woosuk): This is a hack to ensure that the NCCL backend is never
         # deleted before the CUDA graphs.
-        self.pynccl_backend = pynccl_utils.get_nccl_backend()
+        self.pynccl_backend = pymccl_utils.get_nccl_backend()
 
         assert not self.model_config.enforce_eager
         logger.info("Capturing the model for CUDA graphs. This may lead to "
@@ -947,12 +950,12 @@ class ModelRunner:
 
         # Prepare dummy inputs. These will be reused for all batch sizes.
         max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
-        input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
-        input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
-        slot_mapping = torch.empty(max_batch_size, dtype=torch.long).cuda()
+        input_tokens = torch.zeros(max_batch_size, dtype=torch.long).musa()
+        input_positions = torch.zeros(max_batch_size, dtype=torch.long).musa()
+        slot_mapping = torch.empty(max_batch_size, dtype=torch.long).musa()
         slot_mapping.fill_(_PAD_SLOT_ID)
-        seq_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
-        block_tables = torch.from_numpy(self.graph_block_tables).cuda()
+        seq_lens = torch.ones(max_batch_size, dtype=torch.int32).musa()
+        block_tables = torch.from_numpy(self.graph_block_tables).musa()
 
         graph_batch_size = _get_graph_batch_size(
             self.scheduler_config.max_num_seqs)
@@ -981,7 +984,7 @@ class ModelRunner:
                     seq_start_loc=None,
                     context_lens_tensor=None,
                     block_tables=block_tables[:batch_size],
-                    use_cuda_graph=True,
+                    use_cuda_graph=False,
                 )
                 attn_metadata = AttentionMetadata(
                     num_prefills=0,
@@ -1000,16 +1003,16 @@ class ModelRunner:
                     )
                     self.set_active_loras(set(), lora_mapping)
 
-                graph_runner = CUDAGraphRunner(self.model)
-                graph_runner.capture(
-                    input_tokens[:batch_size],
-                    input_positions[:batch_size],
-                    kv_caches,
-                    attn_metadata,
-                    memory_pool=self.graph_memory_pool,
-                )
-                self.graph_memory_pool = graph_runner.graph.pool()
-                self.graph_runners[batch_size] = graph_runner
+                # graph_runner = CUDAGraphRunner(self.model)
+                # graph_runner.capture(
+                #     input_tokens[:batch_size],
+                #     input_positions[:batch_size],
+                #     kv_caches,
+                #     attn_metadata,
+                #     memory_pool=self.graph_memory_pool,
+                # )
+                # self.graph_memory_pool = graph_runner.graph.pool()
+                # self.graph_runners[batch_size] = graph_runner
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
@@ -1038,7 +1041,7 @@ class CUDAGraphRunner:
         self.input_buffers: Dict[str, torch.Tensor] = {}
         self.output_buffers: Dict[str, torch.Tensor] = {}
 
-        self._graph: Optional[torch.cuda.CUDAGraph] = None
+        self._graph: Optional[torch.musa.MUSAGraph] = None
 
     @property
     def graph(self):
@@ -1066,13 +1069,14 @@ class CUDAGraphRunner:
                 attn_metadata,
                 **kwargs,
             )
-        torch.cuda.synchronize()
+        torch.musa.synchronize()
 
         # Capture the graph.
         # NOTE(woosuk): Python 3.8 does not support multi-line with statements.
         # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
-        self._graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self._graph, pool=memory_pool):  # noqa: SIM117
+        import pdb;pdb.set_trace()
+        self._graph = torch.musa.MUSAGraph()
+        with torch.musa.graph(self._graph, pool=memory_pool):  # noqa: SIM117
             with _maybe_pynccl():
                 hidden_states = self.model(
                     input_ids,
@@ -1081,7 +1085,7 @@ class CUDAGraphRunner:
                     attn_metadata,
                     **kwargs,
                 )
-        torch.cuda.synchronize()
+        torch.musa.synchronize()
 
         # Save the input and output buffers.
         self.input_buffers = {
@@ -1127,7 +1131,7 @@ class CUDAGraphRunner:
 
 @contextlib.contextmanager
 def _maybe_pynccl():
-    if pynccl_utils.is_initialized(
+    if pymccl_utils.is_initialized(
     ) and not custom_all_reduce.is_initialized():
         with with_pynccl_for_all_reduce():
             yield

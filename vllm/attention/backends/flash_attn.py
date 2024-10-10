@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
 
 import torch
-from flash_attn import flash_attn_varlen_func
+import torch_musa
+from torch.nn.functional import scaled_dot_product_attention
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
@@ -141,11 +142,13 @@ class FlashAttentionImpl(AttentionImpl):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
-        self.sliding_window = ((sliding_window, sliding_window)
-                               if sliding_window is not None else (-1, -1))
+        self.sliding_window = -1
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
+        
+        self.need_mask = (self.alibi_slopes is not None
+                          or self.sliding_window is not None)
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -181,6 +184,11 @@ class FlashAttentionImpl(AttentionImpl):
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
+        
+        # enable musa flash attention
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_math_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
 
         if kv_cache is not None:
             key_cache, value_cache = PagedAttention.split_kv_cache(
@@ -207,31 +215,35 @@ class FlashAttentionImpl(AttentionImpl):
         query = query[:num_prefill_tokens]
         key = key[:num_prefill_tokens]
         value = value[:num_prefill_tokens]
+        query = query.movedim(0, query.dim() - 2).unsqueeze(0)
+        key = key.movedim(0, key.dim() - 2).unsqueeze(0)
+        value = value.movedim(0, value.dim() - 2).unsqueeze(0)
 
-        assert query.shape[0] == num_prefill_tokens
         assert decode_query.shape[0] == num_decode_tokens
 
         if prefill_meta := attn_metadata.prefill_metadata:
+            tensor = torch.full(
+            (1, 1, num_tokens, num_tokens),
+            dtype=torch.bool,
+            fill_value=1,
+            device=query.device)
+            att_mask = torch.tril(tensor, diagonal=0)
             # Prompt run.
             if kv_cache is None or prefill_meta.block_tables.numel() == 0:
                 # normal attention
                 # When block_tables are not filled, it means q and k are the
                 # prompt, and they have the same length.
-                out = flash_attn_varlen_func(
-                    q=query,
-                    k=key,
-                    v=value,
-                    cu_seqlens_q=prefill_meta.seq_start_loc,
-                    cu_seqlens_k=prefill_meta.seq_start_loc,
-                    max_seqlen_q=prefill_meta.max_seq_len,
-                    max_seqlen_k=prefill_meta.max_seq_len,
-                    softmax_scale=self.scale,
-                    causal=True,
-                    window_size=self.sliding_window,
-                    alibi_slopes=self.alibi_slopes,
+                attn_output = scaled_dot_product_attention(
+                    query.contiguous(),
+                    key.contiguous(),
+                    value.contiguous(),
+                    attn_mask=att_mask.contiguous(),
+                    dropout_p=0.0,
+                    is_causal=False,
                 )
-                assert output[:num_prefill_tokens].shape == out.shape
-                output[:num_prefill_tokens] = out
+                attn_output = attn_output.squeeze(0).permute(1, 0, 2).contiguous()
+                assert output[:num_prefill_tokens].shape == attn_output.shape
+                output[:num_prefill_tokens] = attn_output
             else:
                 # prefix-enabled attention
                 # TODO(Hai) this triton kernel has regression issue (broke) to
