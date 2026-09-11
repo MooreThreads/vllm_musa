@@ -230,6 +230,10 @@ class MUSAPlatformBase(Platform):
         """This is the MUSA platform."""
         return True
 
+    @classmethod
+    def is_float64_supported(cls) -> bool:
+        return False
+
     def is_sleep_mode_available(self) -> bool:
         """MUSA supports sleep mode."""
         return True
