@@ -19,7 +19,7 @@ def test_flashinfer_pin_is_provider_checkout():
     assert "if not module_target.exists()" in setup
     assert "shutil.copytree(source, target)" in setup
     assert "dependency_packages" in setup
-    assert "target.resolve() != source_resolved" in setup
+    assert "target.resolve() == source_resolved" in setup
     assert "_FLASHINFER_REPO.git_tag" in setup
 
 
