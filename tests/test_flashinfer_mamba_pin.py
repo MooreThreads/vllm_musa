@@ -15,11 +15,11 @@ def test_flashinfer_pin_is_provider_checkout():
     assert 'git_repository="https://github.com/yeahdongcn/flashinfer.git"' in setup
     assert "_install_flashinfer_mamba" in setup
     assert "MUSA_PROVIDER_COMMIT" in setup
-    assert "target_root == source_root" in setup
+    assert "target_root = Path(locations[0]).resolve()" in setup
     assert "if not module_target.exists()" in setup
     assert "shutil.copytree(source, target)" in setup
     assert "dependency_packages" in setup
-    assert "target.resolve() == source_resolved" in setup
+    assert "target.resolve() != source_resolved" in setup
     assert "_FLASHINFER_REPO.git_tag" in setup
 
 
