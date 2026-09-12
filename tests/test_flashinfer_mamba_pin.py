@@ -15,6 +15,8 @@ def test_flashinfer_pin_is_provider_checkout():
     assert 'git_repository="https://github.com/yeahdongcn/flashinfer.git"' in setup
     assert "_install_flashinfer_mamba" in setup
     assert "MUSA_PROVIDER_COMMIT" in setup
+    assert "shutil.copytree(source, target)" in setup
+    assert "_FLASHINFER_REPO.git_tag" in setup
 
 
 def test_mamba_provider_pin_is_documented():
