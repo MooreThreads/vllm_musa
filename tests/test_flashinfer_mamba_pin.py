@@ -15,7 +15,11 @@ def test_flashinfer_pin_is_provider_checkout():
     assert 'git_repository="https://github.com/yeahdongcn/flashinfer.git"' in setup
     assert "_install_flashinfer_mamba" in setup
     assert "MUSA_PROVIDER_COMMIT" in setup
+    assert "target_root == source_root" in setup
+    assert "if not module_target.exists()" in setup
     assert "shutil.copytree(source, target)" in setup
+    assert "dependency_packages" in setup
+    assert "target.resolve() == source_resolved" in setup
     assert "_FLASHINFER_REPO.git_tag" in setup
 
 
@@ -28,4 +32,7 @@ def test_mamba_provider_pin_is_documented():
 def test_docker_image_verifies_provider_installation():
     dockerfile = (ROOT / "docker/musa.Dockerfile").read_text()
     assert "FlashInfer Mamba provider installed" in dockerfile
-    assert "flashinfer.mamba" in dockerfile
+    assert "import flashinfer.mamba as m" in dockerfile
+    assert "ssd_combined_fwd_varlen" in dockerfile
+    assert "selective_state_update" in dockerfile
+    assert 'marker.read_text().strip() == pins["FLASHINFER_COMMIT"]' in dockerfile

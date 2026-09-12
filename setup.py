@@ -513,10 +513,13 @@ class _CustomBuildExt(BuildExtension):
         """Install the pinned Python Mamba provider into FlashInfer's package.
 
         The MUSA wheel supplies the native extension, while the Mamba2/SSD
-        provider is maintained in the pinned source checkout. Copy only the
-        ``mamba`` subpackage so the wheel's native import root is preserved.
+        provider is maintained in the pinned source checkout. The Mamba
+        modules use FlashInfer's tracing/JIT helper modules, which are not
+        shipped by the small MUSA native wheel, so copy the pure-Python
+        provider closure while preserving any native wheel files.
         """
-        source = Path(repo_path) / "flashinfer" / "mamba"
+        source_root = Path(repo_path) / "flashinfer"
+        source = source_root / "mamba"
         if not source.is_dir():
             raise RuntimeError(
                 f"Pinned FlashInfer checkout has no Mamba provider: {source}"
@@ -532,7 +535,39 @@ class _CustomBuildExt(BuildExtension):
                 "flashinfer-python must be installed before building vLLM-MUSA; "
                 "the native package root is required for the Mamba provider"
             )
-        target = Path(locations[0]) / "mamba"
+        target_root = Path(locations[0]).resolve()
+        source_root = source_root.resolve()
+        if target_root == source_root:
+            raise RuntimeError(
+                "Pinned FlashInfer source and installed package are the same "
+                "path; refusing to overwrite the checkout"
+            )
+
+        # The wheel intentionally contains only its native-facing Python
+        # surface. Overlay the provider's pure-Python dependency closure into
+        # that package, without replacing existing wheel modules (decode,
+        # gemm, rope, and the native extension metadata).
+        dependency_packages = ("autotuner", "fused_moe", "jit", "trace", "triton")
+        for package in dependency_packages:
+            package_source = source_root / package
+            if package_source.is_dir():
+                for module_source in package_source.rglob("*.py"):
+                    module_target = target_root / module_source.relative_to(source_root)
+                    if not module_target.exists():
+                        module_target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(module_source, module_target)
+        for module_source in source_root.glob("*.py"):
+            module_target = target_root / module_source.name
+            if not module_target.exists() and module_source.name != "__init__.py":
+                shutil.copy2(module_source, module_target)
+
+        target = target_root / "mamba"
+        source_resolved = source.resolve()
+        if target.resolve() == source_resolved:
+            raise RuntimeError(
+                "Pinned FlashInfer Mamba source and installed package are the "
+                "same path; refusing to overwrite the checkout"
+            )
         if target.exists():
             shutil.rmtree(target)
         shutil.copytree(source, target)
