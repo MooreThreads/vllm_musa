@@ -23,3 +23,9 @@ def test_mamba_provider_pin_is_documented():
     docs = (ROOT / "docs/mdm-developer-guide.md").read_text()
     assert "Mamba2/SSD" in docs
     assert "FLASHINFER_COMMIT" in docs
+
+
+def test_docker_image_verifies_provider_installation():
+    dockerfile = (ROOT / "docker/musa.Dockerfile").read_text()
+    assert "FlashInfer Mamba provider installed" in dockerfile
+    assert "flashinfer.mamba" in dockerfile

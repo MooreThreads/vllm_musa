@@ -291,7 +291,8 @@ ENV PIP_INDEX_URL=${PYPI_INDEX_URL}
 COPY . /vllm-workspace
 RUN python -m pip install \
         -e . --no-build-isolation -v && \
-    python -m pip install numpy==1.26
+    python -m pip install numpy==1.26 && \
+    python -c 'import importlib.util, pathlib; spec = importlib.util.find_spec("flashinfer.mamba"); assert spec is not None and spec.submodule_search_locations is not None; marker = pathlib.Path(next(iter(spec.submodule_search_locations))) / "MUSA_PROVIDER_COMMIT"; assert marker.is_file(), marker; print(f"FlashInfer Mamba provider installed: {marker.read_text().strip()}")'
 
 RUN python -m pip install \
         --no-cache-dir \
