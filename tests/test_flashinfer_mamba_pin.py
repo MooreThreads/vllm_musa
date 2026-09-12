@@ -1,0 +1,21 @@
+"""The FlashInfer source pin must include the Python Mamba provider."""
+
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_flashinfer_pin_is_provider_checkout():
+    pins = (ROOT / "third_party/PINS").read_text()
+    setup = (ROOT / "setup.py").read_text()
+    commit = re.search(r"^FLASHINFER_COMMIT=(\w{40})$", pins, re.MULTILINE)
+    assert commit is not None
+    assert "FLASHINFER_MAMBA_COMMIT" not in pins
+    assert 'git_repository="https://github.com/yeahdongcn/flashinfer.git"' in setup
+
+
+def test_mamba_provider_pin_is_documented():
+    docs = (ROOT / "docs/mdm-developer-guide.md").read_text()
+    assert "Mamba2/SSD" in docs
+    assert "FLASHINFER_COMMIT" in docs
