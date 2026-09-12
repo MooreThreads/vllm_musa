@@ -13,6 +13,8 @@ def test_flashinfer_pin_is_provider_checkout():
     assert commit is not None
     assert "FLASHINFER_MAMBA_COMMIT" not in pins
     assert 'git_repository="https://github.com/yeahdongcn/flashinfer.git"' in setup
+    assert "_install_flashinfer_mamba" in setup
+    assert "MUSA_PROVIDER_COMMIT" in setup
 
 
 def test_mamba_provider_pin_is_documented():
