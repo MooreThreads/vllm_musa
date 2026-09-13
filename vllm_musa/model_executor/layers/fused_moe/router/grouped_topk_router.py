@@ -408,6 +408,7 @@ def grouped_topk(
         and scoring_func == "sigmoid"
         and num_expert_group == 1
         and topk_group == 1
+        and gating_output.shape[1] == 128
         and num_fused_shared_experts == 0
         and e_score_correction_bias is not None
     ):
