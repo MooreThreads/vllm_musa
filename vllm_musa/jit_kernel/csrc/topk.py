@@ -20,9 +20,9 @@ def _topk_module():
 def _call_topk_kernel(name: str, *args: object) -> None:
     """Launch a TVM-FFI top-k kernel on PyTorch's current MUSA stream."""
     kernel = getattr(_topk_module(), name)
-    # TVM FFI keeps an independent stream context.  Synchronize it with the
-    # active torch.musa stream so graph replay and MTP do not race producer and
-    # consumer kernels when the current stream is non-default.
+    # TVM FFI keeps an independent stream context.  Bind it to the active
+    # torch.musa stream so graph replay and MTP do not launch producer and
+    # consumer kernels on different streams.
     if getattr(torch.version, "musa", None) is not None:
         import tvm_ffi
 
