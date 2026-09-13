@@ -10,4 +10,4 @@ VLLM_TAG=v0.28.0
 VLLM_COMMIT=2cf0a6915ce544dc493a0990f2ea38d81601128a
 # FlashInfer carries both the native extension and the Python Mamba/SSD
 # provider on this fork revision. Keep it decoupled from upstream vLLM.
-FLASHINFER_COMMIT=bd5348655c3009c6718495b1b577d6aa5190498b
+FLASHINFER_COMMIT=3a10fb6a2b10d55cc0dea35f87f85ec639a0a31e
