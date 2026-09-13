@@ -401,8 +401,9 @@ def grouped_topk(
     # With one expert group and one selected group, grouped routing reduces to
     # the biased sigmoid top-k operation.  Keep this case on the existing
     # native MUSA kernel so post2 Inductor does not fuse the top-k indices into
-    # the gather reduction.  The guards preserve the exact upstream semantics;
-    # multi-group routing continues through the grouped implementation below.
+    # the gather reduction.  The guards preserve the selected expert set and
+    # weights; multi-group routing continues through the grouped implementation
+    # below.
     if (
         current_platform.is_musa()
         and scoring_func == "sigmoid"
