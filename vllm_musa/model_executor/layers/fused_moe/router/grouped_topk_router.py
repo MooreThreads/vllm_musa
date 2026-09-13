@@ -274,34 +274,6 @@ def _grouped_topk_general(
     if gating_output.dtype != torch.float32:
         gating_output = gating_output.to(dtype=torch.float32)
 
-    # With one expert group and one selected group, grouped routing reduces to
-    # the biased sigmoid top-k operation.  Keep this case on the existing
-    # native MUSA kernel so post2 Inductor does not fuse the top-k indices into
-    # the gather reduction.  The guards preserve the exact upstream semantics;
-    # multi-group routing continues through the grouped implementation below.
-    if (
-        current_platform.is_musa()
-        and scoring_func == "sigmoid"
-        and num_expert_group == 1
-        and topk_group == 1
-        and num_fused_shared_experts == 0
-        and e_score_correction_bias is not None
-    ):
-        jit_result = _musa_jit_fused_topk(
-            hidden_states=hidden_states,
-            gating_output=gating_output,
-            topk=topk,
-            renormalize=renormalize,
-            indices_type=torch.int32,
-            correction_bias=e_score_correction_bias,
-            scoring_func=scoring_func,
-        )
-        if jit_result is not None:
-            topk_weights, topk_ids = jit_result
-            if routed_scaling_factor != 1.0:
-                topk_weights = topk_weights * routed_scaling_factor
-            return topk_weights, topk_ids
-
     if (
         is_fused_gate
         and (
@@ -426,6 +398,34 @@ def grouped_topk(
     num_fused_shared_experts: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Dispatch MUSA grouped top-k before entering the compiled Torch fallback."""
+    # With one expert group and one selected group, grouped routing reduces to
+    # the biased sigmoid top-k operation.  Keep this case on the existing
+    # native MUSA kernel so post2 Inductor does not fuse the top-k indices into
+    # the gather reduction.  The guards preserve the exact upstream semantics;
+    # multi-group routing continues through the grouped implementation below.
+    if (
+        current_platform.is_musa()
+        and scoring_func == "sigmoid"
+        and num_expert_group == 1
+        and topk_group == 1
+        and num_fused_shared_experts == 0
+        and e_score_correction_bias is not None
+    ):
+        jit_result = _musa_jit_fused_topk(
+            hidden_states=hidden_states,
+            gating_output=gating_output,
+            topk=topk,
+            renormalize=renormalize,
+            indices_type=torch.int32,
+            correction_bias=e_score_correction_bias,
+            scoring_func=scoring_func,
+        )
+        if jit_result is not None:
+            topk_weights, topk_ids = jit_result
+            if routed_scaling_factor != 1.0:
+                topk_weights = topk_weights * routed_scaling_factor
+            return topk_weights, topk_ids
+
     if _can_use_musa_tilelang_grouped_topk(
         hidden_states,
         gating_output,
