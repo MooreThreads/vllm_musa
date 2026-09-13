@@ -17,6 +17,7 @@ def test_flashinfer_pin_is_provider_checkout():
     assert "MUSA_PROVIDER_COMMIT" in setup
     assert "target_root = Path(locations[0]).resolve()" in setup
     assert "package_target = target_root / package" in setup
+    assert "package_target.resolve() == package_source.resolve()" in setup
     assert "shutil.copytree(package_source, package_target)" in setup
     assert "autotuner.py" in setup
     assert "shutil.copytree(source, target)" in setup

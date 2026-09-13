@@ -552,7 +552,9 @@ class _CustomBuildExt(BuildExtension):
             package_source = source_root / package
             if package_source.is_dir():
                 package_target = target_root / package
-                if package_target.exists() and package_target.resolve() != package_source:
+                if package_target.resolve() == package_source.resolve():
+                    continue
+                if package_target.exists():
                     # A wheel from an older FlashInfer release may contain a
                     # package directory which shadows the newer provider's
                     # same-named module (notably autotuner.py).
