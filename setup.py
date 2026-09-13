@@ -551,11 +551,13 @@ class _CustomBuildExt(BuildExtension):
         for package in dependency_packages:
             package_source = source_root / package
             if package_source.is_dir():
-                for module_source in package_source.rglob("*.py"):
-                    module_target = target_root / module_source.relative_to(source_root)
-                    if not module_target.exists():
-                        module_target.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(module_source, module_target)
+                package_target = target_root / package
+                if package_target.exists() and package_target.resolve() != package_source:
+                    # A wheel from an older FlashInfer release may contain a
+                    # package directory which shadows the newer provider's
+                    # same-named module (notably autotuner.py).
+                    shutil.rmtree(package_target)
+                shutil.copytree(package_source, package_target)
         for module_source in source_root.glob("*.py"):
             module_target = target_root / module_source.name
             if not module_target.exists() and module_source.name != "__init__.py":
