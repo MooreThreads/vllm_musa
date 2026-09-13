@@ -291,7 +291,8 @@ ENV PIP_INDEX_URL=${PYPI_INDEX_URL}
 COPY . /vllm-workspace
 RUN python -m pip install \
         -e . --no-build-isolation -v && \
-    python -m pip install numpy==1.26
+        python -m pip install numpy==1.26 && \
+        python -c 'from pathlib import Path; import flashinfer.mamba as m; from flashinfer.mamba.ssd_combined import ssd_combined_fwd_varlen; from flashinfer.mamba.selective_state_update import selective_state_update; pins = dict(line.strip().split("=", 1) for line in (Path("third_party/PINS").read_text().splitlines()) if line.strip().startswith("FLASHINFER_COMMIT=")); marker = Path(m.__file__).parent / "MUSA_PROVIDER_COMMIT"; assert callable(ssd_combined_fwd_varlen) and callable(selective_state_update); assert marker.read_text().strip() == pins["FLASHINFER_COMMIT"], (marker, marker.read_text(), pins["FLASHINFER_COMMIT"]); print(f"FlashInfer Mamba provider installed: {marker.read_text().strip()}")'
 
 RUN python -m pip install \
         --no-cache-dir \

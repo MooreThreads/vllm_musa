@@ -1,0 +1,21 @@
+diff --git a/vllm/config/mamba.py b/vllm/config/mamba.py
+index e8988aab19..5fa2ac242d 100644
+--- a/vllm/config/mamba.py
++++ b/vllm/config/mamba.py
+@@ -85,10 +85,14 @@ class MambaConfig:
+         if self.enable_stochastic_rounding:
+             from vllm.platforms import current_platform
+ 
+-            if not current_platform.is_cuda():
++            is_musa_flashinfer = (
++                getattr(current_platform, "is_musa", lambda: False)()
++                and self.backend == MambaBackendEnum.FLASHINFER
++            )
++            if not current_platform.is_cuda() and not is_musa_flashinfer:
+                 raise ValueError(
+                     "Stochastic rounding for Mamba cache is only supported "
+-                    "on NVIDIA CUDA platforms. Please do not specify  "
++                    "on NVIDIA CUDA platforms or MUSA FlashInfer. Please do not specify  "
+                     "`--enable-mamba-cache-stochastic-rounding`."
+                 )
+             if (

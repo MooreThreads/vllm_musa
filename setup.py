@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib.util
 import os
 import platform
 import shutil
@@ -11,8 +12,10 @@ from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 
 # Activate MUSA patches before importing the torch ecosystem.
+# isort: off
 import torchada  # noqa: F401
 import torch
+# isort: on
 
 root = Path(__file__).parent.resolve()
 sys.path.insert(0, str(root))
@@ -132,7 +135,9 @@ _VLLM_REPO = _RepoInfo(
 
 _FLASHINFER_REPO = _RepoInfo(
     name="flashinfer",
-    git_repository="https://github.com/flashinfer-ai/flashinfer.git",
+    # The fork revision carries both the native extension sources and the
+    # Python Mamba2/SSD provider used by --mamba-backend flashinfer.
+    git_repository="https://github.com/yeahdongcn/flashinfer.git",
     git_tag=_PINS["FLASHINFER_COMMIT"],
     git_shallow=False,
 )
@@ -308,7 +313,7 @@ COMPILE_ARGS = {
 # paths compile out on MUSA), and link torch_cpu (the AOTI stable-ABI shims live
 # in libtorch_cpu.so). torchada's include_paths() auto-appends the stable_compat
 # include dir, and its import patches torch_musa's stable::Tensor accessors.
-from torchada.utils.cpp_extension import (
+from torchada.utils.cpp_extension import (  # noqa: E402, I001
     stable_compat_box_header as _ta_stable_box,
     stable_compat_include_dir as _ta_stable_inc,
 )
@@ -503,6 +508,82 @@ class _CustomBuildExt(BuildExtension):
         for name, status in ba.apply_patch_series(repo, series, strict=True):
             print(f"MUSA build patch: {status:16} {name}")
 
+    @staticmethod
+    def _install_flashinfer_mamba(repo_path):
+        """Install the pinned Python Mamba provider into FlashInfer's package.
+
+        The MUSA wheel supplies the native extension, while the Mamba2/SSD
+        provider is maintained in the pinned source checkout. The Mamba
+        modules use FlashInfer's tracing/JIT helper modules, which are not
+        shipped by the small MUSA native wheel, so copy the pure-Python
+        provider closure while preserving any native wheel files.
+        """
+        source_root = Path(repo_path) / "flashinfer"
+        source = source_root / "mamba"
+        if not source.is_dir():
+            raise RuntimeError(
+                f"Pinned FlashInfer checkout has no Mamba provider: {source}"
+            )
+        spec = importlib.util.find_spec("flashinfer")
+        locations = (
+            list(spec.submodule_search_locations)
+            if spec is not None and spec.submodule_search_locations is not None
+            else []
+        )
+        if not locations:
+            raise RuntimeError(
+                "flashinfer-python must be installed before building vLLM-MUSA; "
+                "the native package root is required for the Mamba provider"
+            )
+        target_root = Path(locations[0]).resolve()
+        source_root = source_root.resolve()
+        if target_root == source_root:
+            raise RuntimeError(
+                "Pinned FlashInfer source and installed package are the same "
+                "path; refusing to overwrite the checkout"
+            )
+
+        # The wheel intentionally contains only its native-facing Python
+        # surface. Overlay the provider's pure-Python dependency closure into
+        # that package, without replacing existing wheel modules (decode,
+        # gemm, rope, and the native extension metadata).
+        dependency_packages = ("autotuner", "fused_moe", "jit", "trace", "triton")
+        for package in dependency_packages:
+            package_source = source_root / package
+            if package_source.is_dir():
+                package_target = target_root / package
+                if package_target.resolve() == package_source.resolve():
+                    continue
+                if package_target.exists():
+                    # A wheel from an older FlashInfer release may contain a
+                    # package directory which shadows the newer provider's
+                    # same-named module (notably autotuner.py).
+                    shutil.rmtree(package_target)
+                shutil.copytree(package_source, package_target)
+        for module_source in source_root.glob("*.py"):
+            module_target = target_root / module_source.name
+            if not module_target.exists() and module_source.name != "__init__.py":
+                shutil.copy2(module_source, module_target)
+
+        target = target_root / "mamba"
+        source_resolved = source.resolve()
+        if target.resolve() == source_resolved:
+            raise RuntimeError(
+                "Pinned FlashInfer Mamba source and installed package are the "
+                "same path; refusing to overwrite the checkout"
+            )
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(source, target)
+        (target / "MUSA_PROVIDER_COMMIT").write_text(
+            f"{_FLASHINFER_REPO.git_tag}\n"
+        )
+        print(
+            f"Installed FlashInfer Mamba provider {_FLASHINFER_REPO.git_tag} "
+            f"into {target}",
+            flush=True,
+        )
+
     def run(self):
         if os.environ.get("SKIP_THIRD_PARTY", "0") == "1":
             print("Skipping third-party repositories cloning (SKIP_THIRD_PARTY=1)")
@@ -521,6 +602,8 @@ class _CustomBuildExt(BuildExtension):
                 _FLASHINFER_REPO.git_shallow,
             )
             print("Third-party repositories ready.")
+
+        self._install_flashinfer_mamba(_FLASHINFER_REPO.source_dir)
 
         # patch the clone BEFORE installing, so the installed vLLM is pre-patched.
         self._apply_musa_patch_series(_VLLM_REPO.source_dir)

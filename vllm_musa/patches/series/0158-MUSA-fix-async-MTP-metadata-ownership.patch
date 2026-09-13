@@ -9,6 +9,7 @@
              # MUSA-3406: copy through persistent pinned CPU buffers so the
              # per-step metadata uploads do not allocate pageable CPU tensors.
              num_reqs = num_draft_tokens.shape[0]
+diff --git a/vllm/v1/spec_decode/llm_base_proposer.py b/vllm/v1/spec_decode/llm_base_proposer.py
 --- a/vllm/v1/spec_decode/llm_base_proposer.py
 +++ b/vllm/v1/spec_decode/llm_base_proposer.py
 @@ -699,14 +699,10 @@

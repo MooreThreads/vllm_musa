@@ -1,0 +1,61 @@
+diff --git a/vllm/model_executor/layers/mamba/ops/ssd_combined.py b/vllm/model_executor/layers/mamba/ops/ssd_combined.py
+index 8c645574b9..fdca6f3edb 100644
+--- a/vllm/model_executor/layers/mamba/ops/ssd_combined.py
++++ b/vllm/model_executor/layers/mamba/ops/ssd_combined.py
+@@ -6,6 +6,7 @@
+ 
+ # ruff: noqa: E501
+ 
++import os
+ import torch
+ from einops import rearrange
+ from packaging import version
+@@ -174,6 +175,7 @@ def mamba_chunk_scan_combined_varlen(
+     dt_limit=(0.0, float("inf")),
+     return_intermediate_states=False,
+     state_dtype=None,
++    backend=None,
+ ):
+     """
+     Argument:
+@@ -202,6 +204,40 @@ def mamba_chunk_scan_combined_varlen(
+     assert cu_seqlens is not None, "cu_seqlens must be provided assuming varlen input"
+     assert seq_idx is not None
+ 
++    if (
++        x.device.type == "musa"
++        and (backend is None or backend == "flashinfer")
++        and os.getenv("VLLM_MUSA_FLASHINFER_SSD", "1") == "1"
++    ):
++        # FlashInfer supplies native MUSA Triton SSD stages for the Mamba2
++        # packed prefill contract. The environment flag remains a rollback
++        # switch to the existing vLLM MUSA SSD provider.
++        from flashinfer.mamba.ssd_combined import (
++            ssd_combined_fwd_varlen as flashinfer_ssd_combined_fwd_varlen,
++        )
++
++        return flashinfer_ssd_combined_fwd_varlen(
++            x=x,
++            dt=dt,
++            A=A,
++            B=B,
++            C=C,
++            chunk_size=chunk_size,
++            cu_seqlens=cu_seqlens,
++            cu_chunk_seqlens=cu_chunk_seqlens,
++            last_chunk_indices=last_chunk_indices,
++            seq_idx=seq_idx,
++            out=out,
++            D=D,
++            z=z,
++            dt_bias=dt_bias,
++            initial_states=initial_states,
++            dt_softplus=dt_softplus,
++            dt_limit=dt_limit,
++            return_intermediate_states=return_intermediate_states,
++            state_dtype=state_dtype,
++        )
++
+     varlen_states = _mamba_chunk_scan_combined_fwd(
+         x,
+         dt,

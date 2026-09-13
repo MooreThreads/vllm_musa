@@ -48,6 +48,10 @@ def apply_patch(
     ``"would-apply"`` (forward-checks clean), or ``"conflict"``. This is the
     non-mutating dry run used by ``musa_sync verify``.
     """
+    # git -C changes repository context but not the process cwd used to
+    # resolve patch filenames. Build invokes this helper with paths relative
+    # to the vLLM-MUSA root, so pass an absolute patch path to git.
+    patch = patch.resolve()
     p = ["--recount", "-p", str(strip)]
     # Already applied? (the reverse patch applies cleanly to the current tree.)
     if _git(repo, ["apply", "--reverse", "--check", *p, str(patch)]).returncode == 0:

@@ -1,3 +1,4 @@
+diff --git a/vllm/v1/spec_decode/llm_base_proposer.py b/vllm/v1/spec_decode/llm_base_proposer.py
 --- a/vllm/v1/spec_decode/llm_base_proposer.py
 +++ b/vllm/v1/spec_decode/llm_base_proposer.py
 @@ -79,6 +79,7 @@
@@ -24,6 +25,7 @@
          draft_token_ids, draft_probs = self._sample_draft_tokens(
              sample_hidden_states, sampling_metadata
          )
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
 --- a/vllm/v1/worker/gpu_model_runner.py
 +++ b/vllm/v1/worker/gpu_model_runner.py
 @@ -1027,7 +1027,9 @@

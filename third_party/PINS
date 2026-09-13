@@ -8,7 +8,6 @@
 # build from the moving release branch alone.
 VLLM_TAG=v0.28.0
 VLLM_COMMIT=2cf0a6915ce544dc493a0990f2ea38d81601128a
-# FlashInfer is intentionally DECOUPLED from upstream vLLM's choice. This is the
-# validated sampling/norm source revision; bump it consciously, not in lockstep
-# with VLLM_TAG/VLLM_COMMIT.
-FLASHINFER_COMMIT=bc29697ba20b7e6bdb728ded98f04788e16ee021
+# FlashInfer carries both the native extension and the Python Mamba/SSD
+# provider on this fork revision. Keep it decoupled from upstream vLLM.
+FLASHINFER_COMMIT=bd5348655c3009c6718495b1b577d6aa5190498b

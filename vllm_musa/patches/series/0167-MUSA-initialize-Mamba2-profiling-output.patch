@@ -1,0 +1,15 @@
+diff --git a/vllm/model_executor/layers/mamba/mamba_mixer2.py b/vllm/model_executor/layers/mamba/mamba_mixer2.py
+--- a/vllm/model_executor/layers/mamba/mamba_mixer2.py
++++ b/vllm/model_executor/layers/mamba/mamba_mixer2.py
+@@ -741,6 +741,11 @@
+             num_decode_tokens = attn_metadata.num_decode_tokens
+ 
+         if attn_metadata is None:
++            # The custom-op caller consumes the supplied output buffer, not
++            # this method's return value. Initialize it during profiling so
++            # the following norm/router cannot read allocator garbage.
++            if current_platform.is_musa():
++                output.zero_()
+             # V1 profile run -- warm up SSD kernels so that autotuning
+             # completes before SSM cache allocation.
+             self._warmup_ssd_kernels(projected_states)

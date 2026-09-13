@@ -161,6 +161,12 @@ their seams. cat-4a drift tripwires are regenerated separately (`musa_sync regen
 `FLASHINFER_COMMIT` only deliberately — it is decoupled from the vLLM pins on purpose
 (upstream's choice breaks the MUSA csrc build path).
 
+`FLASHINFER_COMMIT` pins the fork revision that carries both the native
+sampling/normalization extension and the Python Mamba2/SSD implementation used
+by `--mamba-backend flashinfer`. The legacy `flashinfer-python==0.2.6+musa`
+dependency alone does not provide this provider. Record the pinned revision and
+active Triton version with serving evidence.
+
 ## 6. Verify
 
 - **Offline gate (no GPU):** `python tools/musa_sync.py verify` (alias:
