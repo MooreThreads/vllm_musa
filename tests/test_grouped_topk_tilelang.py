@@ -180,6 +180,60 @@ def _cpu_fp64_reference(
     return weights, ids
 
 
+@pytest.mark.parametrize("non_default_stream", [False, True])
+def test_nemotron_sigmoid_topk_native_stream(non_default_stream: bool) -> None:
+    """The Nemotron single-group route stays correct on the active MUSA stream."""
+    from vllm_musa.model_executor.layers.fused_moe.router.grouped_topk_router import (
+        grouped_topk,
+    )
+
+    torch.manual_seed(123)
+    num_tokens, num_experts, topk = 8, 128, 6
+    hidden_states = torch.empty(
+        (num_tokens, 2688), device="musa", dtype=torch.bfloat16
+    )
+    gating_output = torch.randn(
+        (num_tokens, num_experts), device="musa", dtype=torch.bfloat16
+    )
+    correction_bias = torch.randn(
+        (num_experts,), device="musa", dtype=torch.float32
+    )
+
+    stream = torch.musa.Stream() if non_default_stream else None
+    context = torch.musa.stream(stream) if stream is not None else None
+    if context is not None:
+        context.__enter__()
+    try:
+        weights, ids = grouped_topk(
+            hidden_states,
+            gating_output,
+            topk,
+            True,
+            1,
+            1,
+            "sigmoid",
+            1.0,
+            correction_bias,
+            0,
+        )
+        if stream is not None:
+            stream.synchronize()
+    finally:
+        if context is not None:
+            context.__exit__(None, None, None)
+
+    scores = gating_output.float().sigmoid()
+    ref_ids = torch.topk(scores + correction_bias, topk, dim=-1, sorted=False)[1]
+    ref_weights = scores.gather(1, ref_ids)
+    ref_weights = ref_weights / ref_weights.sum(dim=-1, keepdim=True)
+    dense = torch.zeros_like(scores)
+    dense.scatter_add_(1, ids.long(), weights)
+    ref_dense = torch.zeros_like(scores)
+    ref_dense.scatter_add_(1, ref_ids, ref_weights)
+    assert torch.equal(torch.sort(ids, dim=-1).values, torch.sort(ref_ids, dim=-1).values)
+    assert torch.allclose(dense, ref_dense, atol=2e-5, rtol=2e-5)
+
+
 def _cpu_torch_topk_reference(
     gating_output: torch.Tensor,
     topk: int,
