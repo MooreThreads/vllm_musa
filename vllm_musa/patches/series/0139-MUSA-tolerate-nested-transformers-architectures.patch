@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: musa <musa@local>
+Date: Fri, 11 Sep 2026 16:20:00 +0800
+Subject: [PATCH] MUSA: tolerate nested Transformers configs without architectures
+
+Multimodal models such as Qwen3-VL construct a nested language-model
+configuration from ``text_config``.  Transformers leaves ``architectures``
+unset on that nested config, so ``ModelConfig.architectures`` is empty.  The
+Transformers backend resolver must still select the causal-LM wrapper without
+indexing an absent architecture.
+---
+ vllm/config/model.py | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/vllm/config/model.py b/vllm/config/model.py
+index fcdce3ef585895580e25c9b6b4749d3daa281f42..86426d69850478493660819a2cc17d814e52ceee 100644
+--- a/vllm/config/model.py
++++ b/vllm/config/model.py
+@@ -983,8 +983,13 @@ class ModelConfig:
+         # Check if the architecture we're wrapping has defaults
+         runner = None
+         task = None
+-        if defaults := try_match_architecture_defaults(self.architectures[0]):
+-            _, (runner, task) = defaults
++        # Nested multimodal text configs (e.g. Qwen3-VL) legitimately omit
++        # ``architectures``.  They still use the causal-LM Transformers
++        # wrapper, but there is no architecture entry to inspect for defaults.
++        architectures = self.architectures
++        if architectures:
++            if defaults := try_match_architecture_defaults(architectures[0]):
++                _, (runner, task) = defaults
+         # User specified value take precedence
+         if self.runner != "auto":
+             runner = self.runner
