@@ -1,0 +1,20 @@
+--- /dev/null
++++ b/vllm/triton_utils/musa.py
+@@ -0,0 +1,17 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Shared checks for MUSA Triton compatibility paths."""
++from functools import lru_cache
++
++
++@lru_cache(maxsize=1)
++def is_musa_triton_32() -> bool:
++    import torch
++    from packaging.version import Version
++
++    if getattr(torch.version, "musa", None) is None:
++        return False
++
++    from vllm.triton_utils import triton
++
++    return Version("3.2.0") <= Version(triton.__version__) < Version("3.3.0")

@@ -1,0 +1,10 @@
+--- a/vllm/model_executor/layers/mamba/ops/ssd_chunk_scan.py
++++ b/vllm/model_executor/layers/mamba/ops/ssd_chunk_scan.py
+@@ -499,6 +499,7 @@
+     initstates_ptr = initial_states
+     if is_musa_triton_32() and initial_states is None:
+         initstates_ptr = states
++        initial_states_strides = states.stride()
+ 
+     # Keep the BF16 dot lowering scoped to the affected MUSA Triton stack.
+     is_musa = is_musa_triton_32()

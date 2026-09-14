@@ -1,0 +1,38 @@
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -3993,6 +3993,7 @@
+         num_tokens: int,
+         num_reqs: int,
+         force_uniform_decode: bool | None = None,
++        has_prefill: bool = False,
+     ) -> bool:
+         """
+         Checks if it's a decode batch with same amount scheduled tokens
+@@ -4002,6 +4003,7 @@
+             (
+                 (max_num_scheduled_tokens == uniform_decode_query_len)
+                 and (num_tokens == max_num_scheduled_tokens * num_reqs)
++                and not has_prefill
+             )
+             if force_uniform_decode is None
+             else force_uniform_decode
+@@ -4074,12 +4076,19 @@
+         torch.Tensor | None,
+         CUDAGraphStat | None,
+     ]:
++        has_prefill = self.model_config.is_hybrid and bool(
++            (
++                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
++                < self.input_batch.num_prompt_tokens_cpu_tensor[:num_reqs]
++            ).any()
++        )
+         uniform_decode = self._is_uniform_decode(
+             max_num_scheduled_tokens=max_num_scheduled_tokens,
+             uniform_decode_query_len=self.uniform_decode_query_len,
+             num_tokens=num_tokens,
+             num_reqs=num_reqs,
+             force_uniform_decode=force_uniform_decode,
++            has_prefill=has_prefill,
+         )
+         # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
+         # is present). Also, chunked-prefill is disabled, so batch are uniform.

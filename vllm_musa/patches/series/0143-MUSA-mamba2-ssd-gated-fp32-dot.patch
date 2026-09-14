@@ -1,0 +1,53 @@
+--- a/vllm/model_executor/layers/mamba/ops/ssd_chunk_scan.py
++++ b/vllm/model_executor/layers/mamba/ops/ssd_chunk_scan.py
+@@ -229,6 +229,7 @@
+     stride_D_head: tl.constexpr,
+     # Meta-parameters
+     IS_CAUSAL: tl.constexpr,
++    IS_MUSA: tl.constexpr,
+     HAS_D: tl.constexpr,
+     D_HAS_HDIM: tl.constexpr,
+     HAS_Z: tl.constexpr,
+@@ -328,7 +329,11 @@
+             )
+             prev_states = prev_states.to(C_ptr.dtype.element_ty)
+ 
+-        acc = tl.dot(C, prev_states) * scale_m[:, None]
++        if IS_MUSA:
++            acc = tl.dot(C.to(tl.float32), prev_states.to(tl.float32))
++        else:
++            acc = tl.dot(C, prev_states)
++        acc *= scale_m[:, None]
+ 
+     else:
+         prev_states_ptrs = (
+@@ -355,7 +360,10 @@
+                     other=0.0,
+                 )
+                 prev_states = prev_states.to(C_ptr.dtype.element_ty)
+-            acc += tl.dot(C, prev_states)
++            if IS_MUSA:
++                acc += tl.dot(C.to(tl.float32), prev_states.to(tl.float32))
++            else:
++                acc += tl.dot(C, prev_states)
+             C_ptrs += BLOCK_SIZE_K
+             prev_states_ptrs += BLOCK_SIZE_K
+         acc *= scale_m[:, None]
+@@ -500,6 +508,9 @@
+     initstates_ptr = initial_states
+     if is_musa_triton_32() and initial_states is None:
+         initstates_ptr = states
++
++    # Keep the BF16 dot lowering scoped to the affected MUSA Triton stack.
++    is_musa = is_musa_triton_32()
+ 
+     _chunk_scan_fwd_kernel[grid](
+         cb_ptr=cb,
+@@ -551,6 +562,7 @@
+         stride_init_states_dstate=initial_states_strides[3],
+         stride_D_head=D.stride(0) if D is not None else 0,
+         IS_CAUSAL=True,
++        IS_MUSA=is_musa,
+         HAS_D=D is not None,
+         D_HAS_HDIM=D.dim() == 2 if D is not None else True,
+         HAS_Z=z is not None,

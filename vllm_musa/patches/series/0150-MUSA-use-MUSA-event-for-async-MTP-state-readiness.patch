@@ -1,0 +1,45 @@
+diff --git a/vllm/v1/spec_decode/llm_base_proposer.py b/vllm/v1/spec_decode/llm_base_proposer.py
+index 5f888eb..41746e9 100644
+--- a/vllm/v1/spec_decode/llm_base_proposer.py
++++ b/vllm/v1/spec_decode/llm_base_proposer.py
+@@ -78,6 +78,7 @@ class SpecDecodeBaseProposer:
+         runner=None,
+     ):
+         self.vllm_config = vllm_config
++        self.runner = runner
+         assert vllm_config.speculative_config is not None
+         self.speculative_config = vllm_config.speculative_config
+         self.draft_model_config = self.speculative_config.draft_model_config
+@@ -672,6 +673,17 @@ class SpecDecodeBaseProposer:
+                         f"{self.allowed_attn_types}"
+                     )
+ 
++        if (
++            current_platform.is_musa()
++            and self.vllm_config.scheduler_config.async_scheduling
++        ):
++            # Wait for target Mamba state postprocess before draft sampling.
++            state_event = getattr(self.runner, "num_accepted_tokens_event", None)
++            if state_event is None:
++                torch.musa.current_stream().synchronize()
++            else:
++                torch.musa.current_stream().wait_event(state_event)
++
+         # Generate the remaining draft tokens.
+         draft_token_ids_list = [draft_token_ids]
+ 
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+index c6f1b57..18659b6 100644
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -1026,7 +1026,9 @@ class GPUModelRunner(
+         self.num_accepted_tokens_event: torch.Event | None = None
+         if self.num_spec_tokens:
+             self.draft_token_ids_event = torch.Event()
+-            self.num_accepted_tokens_event = torch.Event()
++            self.num_accepted_tokens_event = (
++                torch.musa.Event() if current_platform.is_musa() else torch.Event()
++            )
+             self.draft_token_ids_copy_stream = torch.cuda.Stream()
+             self.draft_token_ids_cpu = torch.empty(
+                 (self.max_num_reqs, self.num_spec_tokens),
