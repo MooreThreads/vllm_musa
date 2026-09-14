@@ -463,35 +463,41 @@ index ea87e17bd..b358d669f 100644
      mamba_blocks_per_request = max(
          cdiv(
              group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
-@@ -1453,7 +1450,14 @@ def _musa_separated_mamba_attn_tensors(vllm_config, kv_cache_groups, available_m
+@@ -1453,7 +1450,15 @@ def _musa_separated_mamba_attn_tensors(vllm_config, kv_cache_groups, available_m
          )
          for group in mamba_groups
      )
 -    mamba_num_blocks = max_num_seqs * mamba_blocks_per_request + 1
-+    # Keep two active batches plus a cache batch for turnover.  A completed
-+    # request can retain its replay-boundary state until the LRU queue evicts
-+    # it; during that interval a new batch still needs one working block per
-+    # sequence.  The lower bound also covers the default 16-request warmup
-+    # used by serving benchmarks when max_num_seqs is configured smaller.
-+    mamba_num_blocks = (
-+        max(4 * max_num_seqs, 32) * mamba_blocks_per_request + 1
++    # Preserve the pre-0138 sizing when local prefix caching is disabled.
++    # Prefix caching retains completed requests' replay-boundary states, so
++    # use extra turnover headroom only when that cache is actually enabled.
++    pool_batch_factor = (
++        max(4 * max_num_seqs, 32)
++        if vllm_config.cache_config.enable_prefix_caching
++        else max_num_seqs
 +    )
++    mamba_num_blocks = pool_batch_factor * mamba_blocks_per_request + 1
      mamba_layers = [ln for g in mamba_groups for ln in g.layer_names]
      mamba_bytes = mamba_page * mamba_num_blocks * len(mamba_layers)
      attn_group_size = max(len(g.layer_names) for g in attn_groups)
-@@ -2144,12 +2148,14 @@ def _max_memory_usage_bytes_from_groups(
+@@ -2144,12 +2148,19 @@ def _max_memory_usage_bytes_from_groups(
          mamba_page = get_uniform_page_size(
              [group.kv_cache_spec for group in mamba_groups]
          )
-+        # Match _musa_separated_mamba_attn_tensors: resident state sizing plus
-+        # two active batches and a cache batch for turnover.
++        # Keep the sizing rule identical to _musa_separated_mamba_attn_tensors:
++        # legacy capacity without local prefix caching, and turnover headroom
++        # when completed requests can remain in the prefix cache.
          mamba_blocks_per_request = max(
              cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), mamba_page)
              for group in mamba_groups
          )
          mamba_num_blocks = (
 -            vllm_config.scheduler_config.max_num_seqs
-+            max(4 * vllm_config.scheduler_config.max_num_seqs, 32)
++            (
++                max(4 * vllm_config.scheduler_config.max_num_seqs, 32)
++                if vllm_config.cache_config.enable_prefix_caching
++                else vllm_config.scheduler_config.max_num_seqs
++            )
              * mamba_blocks_per_request
              + 1
          )
