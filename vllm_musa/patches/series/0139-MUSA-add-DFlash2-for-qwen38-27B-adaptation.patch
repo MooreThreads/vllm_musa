@@ -1,0 +1,1178 @@
+diff --git a/vllm/compilation/piecewise_backend.py b/vllm/compilation/piecewise_backend.py
+index d89472d135..aced1eeaa0 100644
+--- a/vllm/compilation/piecewise_backend.py
++++ b/vllm/compilation/piecewise_backend.py
+@@ -370,13 +370,18 @@ class PiecewiseBackend:
+                 f"{self.compile_ranges}"
+             )
+         else:
+-            # All inputs have static shapes; use the only compiled range_entry
++            # All inputs have static shapes.  In practice a static graph can
++            # still have multiple compiled range entries when the configured
++            # compile ranges partition the warmup size.  The largest range is
++            # the one covering that static warmup shape; selecting it keeps
++            # the static path deterministic instead of asserting on the
++            # unrelated lower ranges.
+             compiled_entries = [re for re in self.range_entries.values() if re.compiled]
+-            assert len(compiled_entries) == 1, (
+-                f"Expected exactly one compiled range_entry for static shape "
+-                f"compilation, but found {len(compiled_entries)}"
++            assert compiled_entries, "No compiled range entries available"
++            range_entry = max(
++                compiled_entries,
++                key=lambda entry: (entry.compile_range.end, entry.compile_range.start),
+             )
+-            range_entry = compiled_entries[0]
+ 
+         assert range_entry.compiled, (
+             "All ranges should be compiled or loaded up front in "
+diff --git a/vllm/model_executor/models/qwen3_dflash.py b/vllm/model_executor/models/qwen3_dflash.py
+index 410204490e..364d65236c 100644
+--- a/vllm/model_executor/models/qwen3_dflash.py
++++ b/vllm/model_executor/models/qwen3_dflash.py
+@@ -75,26 +75,6 @@ def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
+     )
+ 
+ 
+-def dflash_target_rope_is_neox_style(target_model: nn.Module) -> bool | None:
+-    """The target's RoPE layout, from its first attention layer.
+-
+-    A DFlash head must rotate Q/K the way the target it was distilled against
+-    does, and a mismatch is silent — acceptance collapses but nothing errors and
+-    the output stays correct. Draft checkpoints do not carry this, so take it
+-    from the target. None if the target uses no RoPE.
+-    """
+-    language_model = (
+-        target_model.get_language_model()
+-        if hasattr(target_model, "get_language_model")
+-        else target_model
+-    )
+-    for module in language_model.modules():
+-        style = getattr(module, "is_neox_style", None)
+-        if isinstance(style, bool):
+-            return style
+-    return None
+-
+-
+ def _get_dflash_fc_input_size(vllm_config: VllmConfig) -> int:
+     spec_config = vllm_config.speculative_config
+     config = spec_config.draft_model_config.hf_config
+@@ -316,11 +296,11 @@ class DFlashQwen3DecoderLayer(nn.Module):
+         # non-causal) from the draft config.
+         sliding_window, causal = _resolve_layer_attention(config, layer_idx)
+ 
+-        # RoPE layout, copied off the target at load time by the draft loader
+-        # (see `dflash_target_rope_is_neox_style`). Checkpoints do not carry it:
+-        # a head distilled from an interleaved-RoPE target must rotate the way
+-        # that target does, or every drafted Q/K is wrong and acceptance
+-        # collapses with no error raised.
++        # RoPE layout. The rotation applies to the draft's own Q/K, so this is
++        # fixed by how the head was distilled, not by the target: a neox-trained
++        # head on an interleaved target still needs neox. A mismatch is silent --
++        # acceptance collapses and nothing errors -- so a checkpoint that was
++        # distilled the other way has to say so here.
+         is_neox_style = getattr(config, "is_neox_style", True)
+ 
+         self.self_attn = DFlashQwen3Attention(
+diff --git a/vllm/platforms/interface.py b/vllm/platforms/interface.py
+index 5c041f1632..077f6c9be9 100644
+--- a/vllm/platforms/interface.py
++++ b/vllm/platforms/interface.py
+@@ -171,6 +171,11 @@ class Platform:
+ 
+     additional_env_vars: list[str] = []
+ 
++    @classmethod
++    def is_float64_supported(cls) -> bool:
++        """Whether GPU float64 operations are supported."""
++        return True
++
+     _global_graph_pool: Any | None = None
+ 
+     @property
+diff --git a/vllm/transformers_utils/configs/speculators/algos.py b/vllm/transformers_utils/configs/speculators/algos.py
+index fbd2c45181..e803482a0c 100644
+--- a/vllm/transformers_utils/configs/speculators/algos.py
++++ b/vllm/transformers_utils/configs/speculators/algos.py
+@@ -130,6 +130,30 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
+     )
+ 
+ 
++@register_speculator("dflash2")
++def update_dflash2(config_dict: dict, pre_trained_config: dict) -> None:
++    """
++    Apply DFlash2 specific configuration transformations to the `dict` used
++    to construct the Transformers PreTrainedConfig.
++
++    DFlash2 extends DFlash with a grouped convolution layer and a
++    low-rank candidate selector head. It reuses the same DFlash runtime
++    (method="dflash") but has its own architecture (DFlash2DraftModel)
++    and additional config fields for the convolution and selector.
++    """
++    update_dflash(config_dict, pre_trained_config)
++    pre_trained_config["architectures"] = ["DFlash2DraftModel"]
++
++    for key in (
++        "conv_kernel_size",
++        "conv_group_size",
++        "selector_rank",
++        "selector_top_k",
++    ):
++        if config_dict.get(key) is not None:
++            pre_trained_config["dflash_config"][key] = config_dict[key]
++
++
+ @register_speculator("dspark")
+ def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
+     """
+diff --git a/vllm/transformers_utils/configs/speculators/base.py b/vllm/transformers_utils/configs/speculators/base.py
+index 08368d346f..1cbaf6e801 100644
+--- a/vllm/transformers_utils/configs/speculators/base.py
++++ b/vllm/transformers_utils/configs/speculators/base.py
+@@ -134,4 +134,6 @@ class SpeculatorsConfig(PretrainedConfig):
+         }
+         if result["method"] == "peagle":
+             result.update({"method": "eagle3", "parallel_drafting": True})
++        elif result["method"] == "dflash2":
++            result["method"] = "dflash"
+         return result
+diff --git a/vllm/v1/attention/backends/gdn_attn.py b/vllm/v1/attention/backends/gdn_attn.py
+index 99e15e490b..ede8021ab2 100644
+--- a/vllm/v1/attention/backends/gdn_attn.py
++++ b/vllm/v1/attention/backends/gdn_attn.py
+@@ -283,6 +283,15 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
+             num_spec_decode_tokens = (
+                 query_lens_cpu.sum().item() - num_prefill_tokens - num_decode_tokens
+             )
++            # Avoid device nonzero by transferring CPU-selected row indices.
++            spec_row_indices = async_tensor_h2d(
++                spec_sequence_masks_cpu.nonzero(as_tuple=False).flatten(),
++                device=block_table_tensor.device,
++            )
++            non_spec_row_indices = async_tensor_h2d(
++                (~spec_sequence_masks_cpu).nonzero(as_tuple=False).flatten(),
++                device=block_table_tensor.device,
++            )
+ 
+             # num_decodes and num_spec_decodes are mutually exclusive.
+             # Reclassify non-spec decodes as prefills when spec decodes
+@@ -308,9 +317,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
+                     0, dtype=torch.int32, device=query_start_loc.device
+                 )
+                 # Filter by spec_sequence_masks to exclude padded sequences
+-                spec_state_indices_tensor = block_table_tensor[
+-                    spec_sequence_masks_cpu, : self.num_spec + 1
+-                ]
++                # Build indices from the CPU mask to avoid device nonzero.
++                spec_state_indices_tensor = block_table_tensor.index_select(
++                    0, spec_row_indices
++                )[:, : self.num_spec + 1]
+                 non_spec_state_indices_tensor = None
+                 # Padded sequences are always at the back, so the first
+                 # num_spec_decodes + 1 entries of query_start_loc already
+@@ -334,12 +344,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
+                 non_spec_token_indx = index[:num_non_spec_tokens]
+                 spec_token_indx = index[num_non_spec_tokens:]
+ 
+-                spec_state_indices_tensor = block_table_tensor[
+-                    spec_sequence_masks_cpu, : self.num_spec + 1
+-                ]
+-                non_spec_state_indices_tensor = block_table_tensor[
+-                    ~spec_sequence_masks_cpu, 0
+-                ]
++                spec_state_indices_tensor = block_table_tensor.index_select(
++                    0, spec_row_indices
++                )[:, : self.num_spec + 1]
++                non_spec_state_indices_tensor = block_table_tensor.index_select(
++                    0, non_spec_row_indices
++                )[:, 0]
+ 
+                 spec_query_start_loc = torch.zeros(
+                     num_spec_decodes + 1,
+@@ -347,7 +357,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
+                     device=query_start_loc.device,
+                 )
+                 torch.cumsum(
+-                    query_lens[spec_sequence_masks_cpu],
++                    query_lens.index_select(0, spec_row_indices),
+                     dim=0,
+                     out=spec_query_start_loc[1:],
+                 )
+@@ -357,7 +367,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
+                     device=query_start_loc.device,
+                 )
+                 torch.cumsum(
+-                    query_lens[~spec_sequence_masks_cpu],
++                    query_lens.index_select(0, non_spec_row_indices),
+                     dim=0,
+                     out=non_spec_query_start_loc[1:],
+                 )
+@@ -372,7 +382,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
+                 )
+ 
+             assert num_accepted_tokens is not None
+-            num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
++            num_accepted_tokens = num_accepted_tokens.index_select(0, spec_row_indices)
+ 
+         chunk_indices: torch.Tensor | None = None
+         chunk_offsets: torch.Tensor | None = None
+@@ -410,7 +420,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
+             context_lens_tensor = m.compute_num_computed_tokens()
+             has_initial_state = context_lens_tensor > 0
+             if spec_sequence_masks_cpu is not None:
+-                has_initial_state = has_initial_state[~spec_sequence_masks_cpu]
++                has_initial_state = has_initial_state.index_select(
++                    0, non_spec_row_indices
++                )
+                 assert non_spec_query_start_loc_cpu is not None
+             nums_dict, batch_ptr, token_chunk_offset_ptr = (
+                 compute_causal_conv1d_metadata(
+@@ -448,13 +460,19 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
+                 spec_state_indices_tensor, non_blocking=True
+             )
+             spec_state_indices_tensor = self.spec_state_indices_tensor[:batch_size]
+-            spec_state_indices_tensor[num_spec_decodes:].fill_(NULL_BLOCK_ID)
++            spec_state_indices_tensor[num_spec_decodes:].copy_(
++                torch.full_like(
++                    spec_state_indices_tensor[num_spec_decodes:], NULL_BLOCK_ID
++                )
++            )
+ 
+             self.spec_sequence_masks[:num_spec_decodes].copy_(
+                 spec_sequence_masks[:num_spec_decodes], non_blocking=True
+             )
+             spec_sequence_masks = self.spec_sequence_masks[:batch_size]
+-            spec_sequence_masks[num_spec_decodes:].fill_(False)
++            spec_sequence_masks[num_spec_decodes:].copy_(
++                torch.zeros_like(spec_sequence_masks[num_spec_decodes:])
++            )
+ 
+             assert non_spec_token_indx is not None and spec_token_indx is not None
+             self.non_spec_token_indx[: non_spec_token_indx.size(0)].copy_(
+@@ -474,13 +492,21 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
+             )
+             spec_num_query_tokens = spec_query_start_loc[-1]  # type: ignore[index]
+             spec_query_start_loc = self.spec_query_start_loc[: batch_size + 1]
+-            spec_query_start_loc[num_spec_decodes + 1 :].fill_(spec_num_query_tokens)
++            # MUSA's fill kernel rejects this strided view; copy an expanded
++            # scalar instead while retaining the preallocated graph buffer.
++            spec_query_start_loc[num_spec_decodes + 1 :].copy_(
++                spec_num_query_tokens.expand_as(
++                    spec_query_start_loc[num_spec_decodes + 1 :]
++                )
++            )
+ 
+             self.num_accepted_tokens[:num_spec_decodes].copy_(
+                 num_accepted_tokens, non_blocking=True
+             )
+             num_accepted_tokens = self.num_accepted_tokens[:batch_size]
+-            num_accepted_tokens[num_spec_decodes:].fill_(1)
++            num_accepted_tokens[num_spec_decodes:].copy_(
++                torch.ones_like(num_accepted_tokens[num_spec_decodes:])
++            )
+ 
+         if (
+             self.use_full_cuda_graph
+@@ -499,7 +525,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
+                 non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
+                     :batch_size
+                 ]
+-                non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
++                non_spec_state_indices_tensor[num_decodes:].copy_(
++                    torch.full_like(
++                        non_spec_state_indices_tensor[num_decodes:], NULL_BLOCK_ID
++                    )
++                )
+ 
+                 self.non_spec_query_start_loc[: num_decodes + 1].copy_(
+                     non_spec_query_start_loc, non_blocking=True
+@@ -509,8 +539,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
+                 ]
+                 if num_decodes < batch_size:
+                     assert non_spec_query_start_loc_cpu is not None
+-                    non_spec_query_start_loc[num_decodes + 1 :].fill_(
+-                        non_spec_query_start_loc_cpu[-1].item()
++                    total_tokens = async_tensor_h2d(
++                        non_spec_query_start_loc_cpu[-1:],
++                        device=non_spec_query_start_loc.device,
++                    )
++                    non_spec_query_start_loc[num_decodes + 1 :].copy_(
++                        total_tokens.expand(batch_size - num_decodes)
+                     )
+ 
+         attn_metadata = GDNAttentionMetadata(
+diff --git a/vllm/v1/attention/ops/triton_unified_attention.py b/vllm/v1/attention/ops/triton_unified_attention.py
+--- a/vllm/v1/attention/ops/triton_unified_attention.py
++++ b/vllm/v1/attention/ops/triton_unified_attention.py
+@@ -34,6 +34,13 @@
+ logger = init_logger(__name__)
+ is_batch_invariant = envs.VLLM_BATCH_INVARIANT
+ float8_info = torch.finfo(current_platform.fp8_dtype())
+ 
++# Triton 3.2 misparses optional integer annotations on MUSA.
++_OPTIONAL_STRIDE: tl.constexpr = (
++    None
++    if current_platform.is_musa() and triton.__version__.split(".")[:2] == ["3", "2"]
++    else int | None
++)
++
+ # Resolve the in-kernel tensor-descriptor builtin once at import. The TD load
+ # helpers reference this module-level name (not ``tl.make_tensor_descriptor``
+@@ -269,19 +276,13 @@ def kernel_unified_attention(
+     # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
+     k_scale_cache_ptr=None,
+     v_scale_cache_ptr=None,
+-    # ``tl.int64`` cannot be combined with a ``None`` default — Triton's JIT
+-    # rejects ``Optional[tl.int64]`` / ``tl.int64 | None`` at trace time, and
+-    # plain ``tl.int64 = None`` raises ``TypeError: 'NoneType' object cannot
+-    # be interpreted as an integer`` when callers omit these arguments.
+-    # ``int | None`` is the only annotation that lets the wrapper pass
+-    # ``None`` here so Triton can skip materialising the strides when the
+-    # ``USE_PER_TOKEN_HEAD_SCALES`` branch is dead.
+-    stride_ks_blk: int | None = None,
+-    stride_ks_slot: int | None = None,
+-    stride_ks_head: int | None = None,
+-    stride_vs_blk: int | None = None,
+-    stride_vs_slot: int | None = None,
+-    stride_vs_head: int | None = None,
++    # Infer optional strides on MUSA Triton 3.2; retain upstream types elsewhere.
++    stride_ks_blk: _OPTIONAL_STRIDE = None,
++    stride_ks_slot: _OPTIONAL_STRIDE = None,
++    stride_ks_head: _OPTIONAL_STRIDE = None,
++    stride_vs_blk: _OPTIONAL_STRIDE = None,
++    stride_vs_slot: _OPTIONAL_STRIDE = None,
++    stride_vs_head: _OPTIONAL_STRIDE = None,
+     # KV cache quantization mode handled inside this kernel via constexpr
+     # branches: NONE (0), FP8_PER_TENSOR (1), INT8_PER_TOKEN_HEAD (2),
+     # FP8_PER_TOKEN_HEAD (3). Sub-byte INT4 (4) uses its own
+diff --git a/vllm/v1/core/kv_cache_utils.py b/vllm/v1/core/kv_cache_utils.py
+index b358d669f4..c907817a3f 100644
+--- a/vllm/v1/core/kv_cache_utils.py
++++ b/vllm/v1/core/kv_cache_utils.py
+@@ -1429,1 +1429,12 @@
++def _musa_mamba_request_capacity(vllm_config, mamba_groups) -> int:
++    max_num_seqs = vllm_config.scheduler_config.max_num_seqs
++    if (
++        vllm_config.cache_config.mamba_cache_mode == "none"
++        and any(g.kv_cache_spec.num_speculative_blocks for g in mamba_groups)
++    ):
++        # No retained prefix states: one active batch is sufficient.
++        return max_num_seqs
++    return max(4 * max_num_seqs, 32)
++
++
+ def _musa_separated_mamba_attn_tensors(vllm_config, kv_cache_groups, available_memory):
+@@ -1440,9 +1451,6 @@ def _musa_separated_mamba_attn_tensors(vllm_config, kv_cache_groups, available_m
+     ]
+     mamba_page = get_uniform_page_size([g.kv_cache_spec for g in mamba_groups])
+-    max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+-    # Size the dedicated pool from the resident Mamba state footprint. Align
+-    # mode is made sparse in MambaManager.cache_blocks below, so only boundary
+-    # snapshots occupy this pool; retain one extra batch for turnover.
++    # Each independent Mamba pool needs per-request capacity plus its null block.
+     mamba_blocks_per_request = max(
+         cdiv(
+             group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
+@@ -1450,18 +1458,16 @@ def _musa_separated_mamba_attn_tensors(vllm_config, kv_cache_groups, available_m
+         )
+         for group in mamba_groups
+     )
+-    # Keep two active batches plus a cache batch for turnover.  A completed
+-    # request can retain its replay-boundary state until the LRU queue evicts
+-    # it; during that interval a new batch still needs one working block per
+-    # sequence.  The lower bound also covers the default 16-request warmup
+-    # used by serving benchmarks when max_num_seqs is configured smaller.
+-    mamba_num_blocks = (
+-        max(4 * max_num_seqs, 32) * mamba_blocks_per_request + 1
+-    )
++    mamba_num_blocks = (
++        _musa_mamba_request_capacity(vllm_config, mamba_groups)
++        * mamba_blocks_per_request
++        + 1
++    )
+     mamba_layers = [ln for g in mamba_groups for ln in g.layer_names]
+     mamba_bytes = mamba_page * mamba_num_blocks * len(mamba_layers)
+-    attn_group_size = max(len(g.layer_names) for g in attn_groups)
+-    attn_page = get_uniform_page_size([g.kv_cache_spec for g in attn_groups])
++    attn_block_stride, attn_layers_by_offset = _get_packed_kv_cache_layout(
++        attn_groups
++    )
+     profiling_num_blocks = (
+         vllm_config.cache_config.num_gpu_blocks_override
+         if available_memory == 0
+@@ -1477,15 +1483,17 @@ def _musa_separated_mamba_attn_tensors(vllm_config, kv_cache_groups, available_m
+         if mamba_bytes >= available_memory:
+             raise ValueError("MUSA separate mamba pool needs more memory than available")
+         remaining = available_memory - mamba_bytes
+-        attn_num_blocks = get_num_blocks(
+-            vllm_config, attn_group_size, remaining, attn_page
+-        )
+-    kv_cache_tensors = []
+-    for i in range(attn_group_size):
+-        shared_by = [g.layer_names[i] for g in attn_groups if i < len(g.layer_names)]
+-        kv_cache_tensors.append(
+-            KVCacheTensor(size=attn_page * attn_num_blocks, shared_by=shared_by)
++        attn_num_blocks = remaining // attn_block_stride
++    attn_total_size = attn_block_stride * attn_num_blocks
++    kv_cache_tensors = [
++        KVCacheTensor(
++            size=attn_total_size,
++            shared_by=attn_layers_by_offset[offset],
++            offset=offset,
++            block_stride=attn_block_stride,
+         )
++        for offset in sorted(attn_layers_by_offset)
++    ]
+     for ln in mamba_layers:
+         kv_cache_tensors.append(
+             KVCacheTensor(
+@@ -1975,21 +1983,33 @@ def get_kv_cache_groups(
+         if not isinstance(v, HiddenStateCacheSpec)
+     }
+ 
+-    if (
++    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
++    musa_separate_mamba_pool = (
+         musa_mamba_separate_pool_enabled()
+         and (
+-            vllm_config.kv_transfer_config is None
+-            or vllm_config.kv_transfer_config.kv_connector == "MooncakeConnector"
++            kv_transfer_config is None
++            or kv_transfer_config.kv_connector == "MooncakeConnector"
+         )
+-        and not hidden_specs
+         and any(isinstance(spec, MambaSpec) for spec in filtered_spec.values())
+         and any(not isinstance(spec, MambaSpec) for spec in filtered_spec.values())
+-    ):
++    )
++    if musa_separate_mamba_pool:
+         # MUSA: the dedicated Mamba BlockPools have independent page sizes and
+-        # block-id spaces. Keep the attention spec at its backend-preferred
+-        # block size instead of expanding every attention page to one full
+-        # recurrent-state page. The grouping algorithm itself does not require
+-        # equal page sizes; the separated allocator below handles each family.
++        # block-id spaces. Unify only the non-Mamba specs that share the
++        # attention pool, without expanding every Mamba state page to the
++        # largest target/draft attention page.
++        attention_specs = {
++            name: spec
++            for name, spec in filtered_spec.items()
++            if not isinstance(spec, MambaSpec)
++        }
++        attention_specs = unify_kv_cache_spec_page_size(attention_specs)
++        filtered_spec = {
++            name: (
++                spec if isinstance(spec, MambaSpec) else attention_specs[name]
++            )
++            for name, spec in filtered_spec.items()
++        }
+         groups = _get_kv_cache_groups_uniform_page_size(filtered_spec)
+     else:
+         # Prefer preserving each layer's cache semantics. If physical pages
+@@ -2005,8 +2025,17 @@ def get_kv_cache_groups(
+ 
+     # Add hidden-state layers back with page aligned to the common page.
+     if hidden_specs:
+-        common_page = get_uniform_page_size([g.kv_cache_spec for g in groups])
+-        group_block_size = math.gcd(*(g.kv_cache_spec.block_size for g in groups))
++        alignment_groups = (
++            [g for g in groups if not isinstance(g.kv_cache_spec, MambaSpec)]
++            if musa_separate_mamba_pool
++            else groups
++        )
++        common_page = get_uniform_page_size(
++            [g.kv_cache_spec for g in alignment_groups]
++        )
++        group_block_size = math.gcd(
++            *(g.kv_cache_spec.block_size for g in alignment_groups)
++        )
+         for name, spec in hidden_specs.items():
+             per_token = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
+             max_block_size = max(common_page // per_token, 1)
+@@ -2148,14 +2177,12 @@ def _max_memory_usage_bytes_from_groups(
+         mamba_page = get_uniform_page_size(
+             [group.kv_cache_spec for group in mamba_groups]
+         )
+-        # Match _musa_separated_mamba_attn_tensors: resident state sizing plus
+-        # two active batches and a cache batch for turnover.
+         mamba_blocks_per_request = max(
+             cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), mamba_page)
+             for group in mamba_groups
+         )
+         mamba_num_blocks = (
+-            max(4 * vllm_config.scheduler_config.max_num_seqs, 32)
++            _musa_mamba_request_capacity(vllm_config, mamba_groups)
+             * mamba_blocks_per_request
+             + 1
+         )
+diff --git a/vllm/v1/spec_decode/dflash.py b/vllm/v1/spec_decode/dflash.py
+index 1620d5db79..f0042d7d6f 100644
+--- a/vllm/v1/spec_decode/dflash.py
++++ b/vllm/v1/spec_decode/dflash.py
+@@ -80,21 +80,6 @@ class DFlashProposer(SpecDecodeBaseProposer):
+             self.draft_model_config.hf_config
+         )
+ 
+-    @override
+-    def load_model(self, target_model: torch.nn.Module) -> None:
+-        from vllm.model_executor.models.qwen3_dflash import (
+-            dflash_target_rope_is_neox_style,
+-        )
+-
+-        draft_model_config = self.speculative_config.draft_model_config
+-        assert draft_model_config is not None
+-        # The drafter must rotate Q/K the way its target does. Take that from the
+-        # built target before super() constructs the draft.
+-        is_neox_style = dflash_target_rope_is_neox_style(target_model)
+-        if is_neox_style is not None:
+-            draft_model_config.hf_config.is_neox_style = is_neox_style
+-        super().load_model(target_model)
+-
+     @override
+     def _create_draft_vllm_config(self) -> VllmConfig:
+         base = super()._create_draft_vllm_config()
+diff --git a/vllm/v1/worker/gpu/attn_utils.py b/vllm/v1/worker/gpu/attn_utils.py
+index 06f4c0fdbf..2f342ea8ec 100644
+--- a/vllm/v1/worker/gpu/attn_utils.py
++++ b/vllm/v1/worker/gpu/attn_utils.py
+@@ -23,6 +23,7 @@ from vllm.v1.attention.backend import (
+ )
+ from vllm.v1.kv_cache_interface import (
+     AttentionSpec,
++    HiddenStateCacheSpec,
+     KVCacheConfig,
+     KVCacheSpec,
+     KVQuantMode,
+@@ -285,13 +286,34 @@ def _reshape_attention_kv_cache(
+ 
+     if packing is not None:
+         offset, block_stride = packing
+-        assert inv_order[0] == 0
+-        page_bytes = prod(kv_cache_shape[1:]) * get_dtype_size(dtype)
+-        kv_cache = (
++        page_bytes = (
++            prod(kv_cache_shape) // num_blocks * get_dtype_size(dtype)
++        )
++        packed_pages = (
+             kv_raw_tensor.view(-1, block_stride)[:, offset : offset + page_bytes]
+             .view(dtype)
+-            .view(permuted_kv_cache_shape)
+         )
++        block_dim = kv_cache_shape.index(num_blocks)
++        if block_dim == 0:
++            assert inv_order[0] == 0
++            kv_cache = packed_pages.view(permuted_kv_cache_shape)
++        else:
++            # Pack block-major pages, then restore the backend's K/V-first view.
++            assert (
++                block_dim == 1
++                and inv_order[0] == 0
++                and inv_order[1] == 1
++            ), (
++                "Packed KV-first pages require a [K/V, num_blocks, ...] "
++                f"layout, got shape {kv_cache_shape}, stride order "
++                f"{kv_cache_stride_order}, and num_blocks={num_blocks}."
++            )
++            block_first_shape = (
++                num_blocks,
++                permuted_kv_cache_shape[0],
++                *permuted_kv_cache_shape[2:],
++            )
++            kv_cache = packed_pages.view(block_first_shape).transpose(0, 1)
+     elif kv_cache_spec.page_size_padded is not None:
+         # Use a strided view to skip the padding between physical pages.
+         dtype_size = get_dtype_size(kv_cache_spec.dtype)
+@@ -514,7 +536,9 @@ def _align_mixed_attention_kv_cache_views(
+     block_dims_by_layer: dict[str, int] = {}
+     for group in attn_groups:
+         kv_cache_spec = group.kv_cache_spec
+-        if not isinstance(kv_cache_spec, AttentionSpec):
++        if not isinstance(kv_cache_spec, AttentionSpec) or isinstance(
++            kv_cache_spec, HiddenStateCacheSpec
++        ):
+             continue
+         if group.kv_cache_group_id >= len(kernel_block_sizes):
+             continue
+diff --git a/vllm/v1/worker/gpu/sample/gumbel.py b/vllm/v1/worker/gpu/sample/gumbel.py
+index eff07daf15..5ad9ad9e3c 100644
+--- a/vllm/v1/worker/gpu/sample/gumbel.py
++++ b/vllm/v1/worker/gpu/sample/gumbel.py
+@@ -13,6 +13,12 @@ from vllm.triton_utils import HAS_TRITON, tl, tldevice, triton
+ # attribute is `None`, and `tl.constexpr(...)` would crash at import time.
+ _TL_RAND_MIN = tl.constexpr(4.6566127342e-10) if HAS_TRITON else 4.6566127342e-10
+ 
++# Offset salt keeping the draft's Gumbel noise disjoint from the target's.
++# Verification is a probability-ratio test, not a Gumbel coupling, so a proposal
++# and the residual it is resampled from must not share a noise vector.
++# Positions are int64 and never approach 2**30, so the streams cannot collide.
++_DRAFT_NOISE_SALT = tl.constexpr(1 << 30) if HAS_TRITON else (1 << 30)
++
+ 
+ @triton.jit
+ def _temperature_kernel(
+@@ -94,6 +100,7 @@ def gumbel_noised_argmax(
+     seed,
+     pos,
+     temp,
++    IS_DRAFTING: tl.constexpr,
+     USE_FP64: tl.constexpr,
+     APPLY_TEMPERATURE: tl.constexpr = True,
+ ):
+@@ -113,6 +120,8 @@ def gumbel_noised_argmax(
+     if USE_FP64:
+         logits = logits.to(tl.float64)
+     if temp != 0.0:
++        if IS_DRAFTING:
++            pos = pos + _DRAFT_NOISE_SALT
+         gumbel_seed = tl.randint(seed, pos)
+         if USE_FP64:
+             u = tl_rand64(gumbel_seed, keys, includes_zero=False)
+@@ -141,6 +150,7 @@ def gumbel_block_argmax(
+     logits_cache_stride,
+     logits_cache_col_ptr,
+     vocab_size,
++    IS_DRAFTING: tl.constexpr,
+     APPLY_TEMPERATURE: tl.constexpr,
+     USE_FP64: tl.constexpr,
+     PER_TOKEN_COL: tl.constexpr = False,
+@@ -177,6 +187,7 @@ def gumbel_block_argmax(
+         seed,
+         pos,
+         temp,
++        IS_DRAFTING=IS_DRAFTING,
+         USE_FP64=USE_FP64,
+         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
+     )
+@@ -200,6 +211,7 @@ def _gumbel_sample_kernel(
+     vocab_size,
+     vocab_start_index,
+     BLOCK_SIZE: tl.constexpr,
++    IS_DRAFTING: tl.constexpr,
+     APPLY_TEMPERATURE: tl.constexpr,
+     USE_FP64: tl.constexpr,
+     PER_TOKEN_COL: tl.constexpr,
+@@ -230,6 +242,7 @@ def _gumbel_sample_kernel(
+         logits_cache_stride,
+         logits_cache_col_ptr,
+         vocab_size,
++        IS_DRAFTING=IS_DRAFTING,
+         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
+         USE_FP64=USE_FP64,
+         PER_TOKEN_COL=PER_TOKEN_COL,
+@@ -246,6 +259,7 @@ def gumbel_sample(
+     seed: torch.Tensor,  # [max_num_reqs]
+     pos: torch.Tensor,  # [num_tokens]
+     apply_temperature: bool,
++    is_drafting: bool,
+     logits_cache: torch.Tensor | None = None,  # [max_num_reqs, num_cols, vocab_size]
+     logits_cache_col: torch.Tensor | None = None,  # scalar or [num_tokens]
+     use_fp64: bool = False,
+@@ -281,6 +295,7 @@ def gumbel_sample(
+         vocab_size,
+         vocab_start_index,
+         BLOCK_SIZE=BLOCK_SIZE,
++        IS_DRAFTING=is_drafting,
+         APPLY_TEMPERATURE=apply_temperature,
+         USE_FP64=use_fp64,
+         PER_TOKEN_COL=per_token_col,
+diff --git a/vllm/v1/worker/gpu/sample/sampler.py b/vllm/v1/worker/gpu/sample/sampler.py
+index 4946c25470..f1edd0eeed 100644
+--- a/vllm/v1/worker/gpu/sample/sampler.py
++++ b/vllm/v1/worker/gpu/sample/sampler.py
+@@ -309,6 +309,7 @@ class Sampler:
+                 self.sampling_states.seeds.gpu,
+                 pos,
+                 apply_temperature=False,
++                is_drafting=False,
+                 use_fp64=self.use_fp64_gumbel,
+             )
+         return sampled, processed_logits
+diff --git a/vllm/v1/worker/gpu/spec_decode/autoregressive/speculator.py b/vllm/v1/worker/gpu/spec_decode/autoregressive/speculator.py
+index 57430529f6..c080420dbf 100644
+--- a/vllm/v1/worker/gpu/spec_decode/autoregressive/speculator.py
++++ b/vllm/v1/worker/gpu/spec_decode/autoregressive/speculator.py
+@@ -37,6 +37,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
+         self.last_token_indices = torch.zeros(
+             self.max_num_reqs, dtype=torch.int64, device=device
+         )
++        self.sample_src_positions = torch.zeros(
++            self.max_num_reqs, dtype=torch.int64, device=device
++        )
+ 
+         self.inputs_embeds: torch.Tensor | None = None
+ 
+@@ -321,6 +324,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
+             input_batch.seq_lens,
+             num_rejected,
+             self.input_buffers,
++            self.sample_src_positions,
+             self.max_model_len,
+             self.max_num_reqs,
+             advance_draft_positions=self.advance_draft_positions,
+@@ -428,6 +432,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
+     ) -> None:
+         last_token_indices = self.last_token_indices[:num_reqs]
+         positions = self.input_buffers.positions[last_token_indices]
++        # The output hidden state at position P (= positions) and the token id
++        # at P+1 are used to draft the token at P+2. Sampling keys a draw by the
++        # position before the sampled token, so the net adjustment is +1.
++        sample_src_positions = positions + 1
+         idx_mapping = self.idx_mapping[:num_reqs]
+ 
+         last_hidden_states, hidden_states = self._run_model(
+@@ -438,11 +446,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
+             cudagraph_runtime_mode=cudagraph_runtime_mode,
+             mm_inputs=mm_inputs,
+         )
+-        sample_hidden_states = last_hidden_states[last_token_indices]
+ 
++        sample_hidden_states = last_hidden_states[last_token_indices]
+         self.draft_tokens[:num_reqs, 0] = self.sample_draft(
+             sample_hidden_states,
+-            positions,
++            sample_src_positions,
+             idx_mapping,
+             self.temperature,
+             self.seeds,
+@@ -454,6 +462,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
+         else:
+             self.hidden_states[:num_reqs] = hidden_states[last_token_indices]
+         self.input_buffers.positions[:num_reqs] = positions
++        self.sample_src_positions[:num_reqs] = sample_src_positions
+ 
+     def _multi_step_decode(
+         self,
+@@ -606,7 +615,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
+         self._prepare_eplb_forward(num_reqs)
+ 
+         idx_mapping = self.idx_mapping[:num_reqs]
+-        positions = self.input_buffers.positions[:num_reqs]
+         # Run the draft model forward pass.
+         last_hidden_states, hidden_states = self._run_model(
+             num_tokens_padded,
+@@ -615,18 +623,13 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
+             num_tokens_across_dp,
+             cudagraph_runtime_mode,
+         )
+-        last_hidden_states = last_hidden_states[:num_reqs]
+-
+-        sample_positions = positions
+-        if not self.advance_draft_positions:
+-            # The forward pass holds positions fixed (Q-only, shared target KV),
+-            # but Gumbel sampling still needs the absolute draft position.
+-            sample_positions = positions + self.current_draft_step
+ 
+         # Sample the draft tokens.
++        sample_hidden_states = last_hidden_states[:num_reqs]
++        sample_src_positions = self.sample_src_positions[:num_reqs]
+         draft_tokens = self.sample_draft(
+-            last_hidden_states,
+-            sample_positions,
++            sample_hidden_states,
++            sample_src_positions,
+             idx_mapping,
+             self.temperature,
+             self.seeds,
+@@ -642,6 +645,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
+             self.draft_tokens,
+             self.hidden_states,
+             self.input_buffers,
++            self.sample_src_positions,
+             num_reqs,
+             self.max_model_len,
+             self.num_speculative_steps,
+@@ -779,6 +783,7 @@ def _prepare_decode_inputs_kernel(
+     num_rejected_ptr,
+     input_ids_ptr,
+     positions_ptr,
++    sample_src_positions_ptr,
+     query_start_loc_ptr,
+     seq_lens_ptr,
+     max_model_len,
+@@ -807,6 +812,10 @@ def _prepare_decode_inputs_kernel(
+     draft_token = tl.load(draft_tokens_ptr + req_idx * draft_tokens_stride)
+     tl.store(input_ids_ptr + req_idx, draft_token)
+ 
++    # Advance the draft sampling key.
++    sample_position = tl.load(sample_src_positions_ptr + req_idx)
++    tl.store(sample_src_positions_ptr + req_idx, sample_position + 1)
++
+     target_seq_len = tl.load(target_seq_lens_ptr + req_idx)
+     num_rejected = tl.load(num_rejected_ptr + req_idx)
+     seq_len = target_seq_len - num_rejected
+@@ -826,6 +835,7 @@ def prepare_decode_inputs(
+     target_seq_lens: torch.Tensor,
+     num_rejected: torch.Tensor,
+     input_buffers: InputBuffers,
++    sample_src_positions: torch.Tensor,
+     max_model_len: int,
+     max_num_reqs: int,
+     advance_draft_positions: bool = True,
+@@ -838,6 +848,7 @@ def prepare_decode_inputs(
+         num_rejected,
+         input_buffers.input_ids,
+         input_buffers.positions,
++        sample_src_positions,
+         input_buffers.query_start_loc,
+         input_buffers.seq_lens,
+         max_model_len,
+@@ -855,6 +866,7 @@ def _update_draft_inputs_kernel(
+     next_input_hidden_states_stride,
+     input_ids_ptr,
+     positions_ptr,
++    sample_src_positions_ptr,
+     seq_lens_ptr,
+     draft_tokens_ptr,
+     current_draft_step_ptr,
+@@ -880,6 +892,10 @@ def _update_draft_inputs_kernel(
+         # This is the final step. Skip updating draft forward inputs.
+         return
+ 
++    # Advance the draft sampling key.
++    sample_position = tl.load(sample_src_positions_ptr + req_idx)
++    tl.store(sample_src_positions_ptr + req_idx, sample_position + 1)
++
+     # Write the sampled draft token into the input ids tensor for the next
+     # forward pass.
+     tl.store(input_ids_ptr + req_idx, draft_token)
+@@ -921,6 +937,7 @@ def update_draft_inputs(
+     output_draft_tokens: torch.Tensor,
+     next_input_hidden_states: torch.Tensor,
+     input_buffers: InputBuffers,
++    sample_src_positions: torch.Tensor,
+     num_reqs: int,
+     max_model_len: int,
+     num_speculative_steps: int,
+@@ -934,6 +951,7 @@ def update_draft_inputs(
+         next_input_hidden_states.stride(0),
+         input_buffers.input_ids,
+         input_buffers.positions,
++        sample_src_positions,
+         input_buffers.seq_lens,
+         draft_tokens,
+         current_draft_step,
+diff --git a/vllm/v1/worker/gpu/spec_decode/dflash/speculator.py b/vllm/v1/worker/gpu/spec_decode/dflash/speculator.py
+index eb5dc470b2..9164002d92 100644
+--- a/vllm/v1/worker/gpu/spec_decode/dflash/speculator.py
++++ b/vllm/v1/worker/gpu/spec_decode/dflash/speculator.py
+@@ -137,12 +137,18 @@ class DFlashSpeculator(DraftModelSpeculator):
+         )
+ 
+     def capture(self) -> None:
++        assert self.query_cudagraph_manager is not None
++        if not self.query_cudagraph_manager.cudagraph_mode:
++            logger.info(
++                "Skipping %s graph capture because its graph manager is disabled.",
++                self._speculator_name,
++            )
++            return
+         logger.info("Capturing model for %s speculator...", self._speculator_name)
+         # Padded sample rows must not scatter into a live request during capture.
+         self.sample_indices.zero_()
+         self.sample_pos.zero_()
+         self.sample_idx_mapping.fill_(-1)
+-        assert self.query_cudagraph_manager is not None
+         self.query_cudagraph_manager.capture(
+             self._generate_draft,
+             self.input_buffers,
+@@ -260,11 +266,11 @@ class DFlashSpeculator(DraftModelSpeculator):
+         )
+         num_sample = num_reqs * self.num_speculative_steps
+         sample_hidden_states = last_hidden_states[self.sample_indices[:num_sample]]
+-        # sample_pos is the predicted token's position Q; verification keys
+-        # Gumbel by the predecessor (Q-1). sample_draft adds +1, so pass Q-2.
++        # sample_pos is the predicted token's position P. Sampling keys a draw
++        # by the position before the sampled token, P-1.
+         draft_tokens = self.sample_draft(
+             sample_hidden_states,
+-            self.sample_pos[:num_sample] - 2,
++            self.sample_pos[:num_sample] - 1,
+             self.sample_idx_mapping[:num_sample],
+             self.temperature,
+             self.seeds,
+diff --git a/vllm/v1/worker/gpu/spec_decode/dflash/utils.py b/vllm/v1/worker/gpu/spec_decode/dflash/utils.py
+index b9e6ea02f4..562966e07e 100644
+--- a/vllm/v1/worker/gpu/spec_decode/dflash/utils.py
++++ b/vllm/v1/worker/gpu/spec_decode/dflash/utils.py
+@@ -15,17 +15,11 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
+     from vllm.compilation.backends import set_model_tag
+     from vllm.model_executor.models.qwen3_dflash import (
+         dflash_has_any_non_causal,
+-        dflash_target_rope_is_neox_style,
+     )
+ 
+     speculative_config = vllm_config.speculative_config
+     assert speculative_config is not None
+     draft_model_config = speculative_config.draft_model_config
+-    # The drafter must rotate Q/K the way its target does. Take that from the
+-    # built target before super() constructs the draft.
+-    is_neox_style = dflash_target_rope_is_neox_style(target_model)
+-    if is_neox_style is not None:
+-        draft_model_config.hf_config.is_neox_style = is_neox_style
+     # Select an attention backend that supports the drafter's attention: mixing
+     # a non-causal layer onto a causal-only backend would fail.
+     draft_vllm_config = replace(
+diff --git a/vllm/v1/worker/gpu/spec_decode/dflash2/speculator.py b/vllm/v1/worker/gpu/spec_decode/dflash2/speculator.py
+index 621afc38c7..d9f0e3d2d9 100644
+--- a/vllm/v1/worker/gpu/spec_decode/dflash2/speculator.py
++++ b/vllm/v1/worker/gpu/spec_decode/dflash2/speculator.py
+@@ -7,6 +7,7 @@ import torch
+ 
+ from vllm.config import VllmConfig
+ from vllm.config.compilation import CUDAGraphMode
++from vllm.platforms import current_platform
+ from vllm.triton_utils import tl, triton
+ from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
+ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+@@ -51,15 +52,17 @@ def _selector_walk_kernel(
+             other=0,
+         )
+ 
+-        # Candidate ids key the noise, matching the target's own sampling.
+-        position = tl.load(sample_pos_ptr + flat) - 1
++        # sample_pos is the predicted token's position P. Sampling keys a draw
++        # by the position before the sampled token, P-1.
++        sample_pos = tl.load(sample_pos_ptr + flat) - 1
+         _, index = gumbel_noised_argmax(
+             scores,
+             candidates,
+             mask & valid,
+             seed,
+-            position,
++            sample_pos,
+             temperature if SAMPLE_PROBABILISTIC else 0.0,
++            IS_DRAFTING=True,
+             USE_FP64=USE_FP64,
+         )
+ 
+@@ -110,6 +113,14 @@ class DFlash2Speculator(DFlashSpeculator):
+     _speculator_name = "DFlash2"
+ 
+     def __init__(self, vllm_config: VllmConfig, device: torch.device):
++        # Reject unsupported FP64 Gumbel on this platform.
++        model_config = getattr(vllm_config, "model_config", None)
++        if (getattr(model_config, "use_fp64_gumbel", False)
++                and not current_platform.is_float64_supported()):
++            raise ValueError(
++                "DFlash2 with use_fp64_gumbel=True is not supported on this platform; "
++                "set use_fp64_gumbel=False."
++            )
+         super().__init__(vllm_config, device)
+         draft_config = self.draft_model_config.hf_config.dflash_config
+         self.selector_top_k = int(draft_config["selector_top_k"])
+diff --git a/vllm/v1/worker/gpu/spec_decode/multi_module_mtp/speculator.py b/vllm/v1/worker/gpu/spec_decode/multi_module_mtp/speculator.py
+index fc147b3f49..fed009159f 100644
+--- a/vllm/v1/worker/gpu/spec_decode/multi_module_mtp/speculator.py
++++ b/vllm/v1/worker/gpu/spec_decode/multi_module_mtp/speculator.py
+@@ -375,7 +375,11 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
+         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+     ) -> None:
+         last_token_indices = self.last_token_indices[:num_reqs]
+-        sample_positions = self.input_buffers.positions[last_token_indices]
++        positions = self.input_buffers.positions[last_token_indices]
++        # The output hidden state at position P (= positions) and the token id
++        # at P+1 are used to draft the token at P+2. Sampling keys a draw by the
++        # position before the sampled token, so the net adjustment is +1.
++        sample_src_positions = positions + 1
+         idx_mapping = self.idx_mapping[:num_reqs]
+ 
+         # Cache the trailing token's ids, hidden states (and embeddings for
+@@ -413,7 +417,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
+             sample_hidden_states = last_hidden_states[last_token_indices]
+             draft_tokens = self.sample_draft(
+                 sample_hidden_states,
+-                sample_positions,
++                sample_src_positions,
+                 idx_mapping,
+                 self.temperature,
+                 self.seeds,
+@@ -444,7 +448,8 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
+                     idx_mapping,
+                     num_reqs,
+                 )
+-                sample_positions += 1
++                # Advance the draft sampling key.
++                sample_src_positions += 1
+ 
+ 
+ @triton.jit
+diff --git a/vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py b/vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py
+index c2857861bc..908a70e30b 100644
+--- a/vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py
++++ b/vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py
+@@ -844,6 +844,7 @@ def _resample_kernel(
+         0,  # logits_cache_stride
+         None,  # logits_cache_col_ptr
+         vocab_size,
++        IS_DRAFTING=False,
+         APPLY_TEMPERATURE=False,
+         USE_FP64=USE_FP64,
+     )
+diff --git a/vllm/v1/worker/gpu/spec_decode/speculator.py b/vllm/v1/worker/gpu/spec_decode/speculator.py
+index fc4f78a81a..2170be4d12 100644
+--- a/vllm/v1/worker/gpu/spec_decode/speculator.py
++++ b/vllm/v1/worker/gpu/spec_decode/speculator.py
+@@ -326,7 +326,7 @@ class DraftModelSpeculator(BaseSpeculator):
+     def sample_draft(
+         self,
+         hidden_states: torch.Tensor,
+-        positions: torch.Tensor,
++        sample_src_positions: torch.Tensor,
+         idx_mapping: torch.Tensor,
+         temperature: torch.Tensor,
+         seeds: torch.Tensor,
+@@ -335,15 +335,14 @@ class DraftModelSpeculator(BaseSpeculator):
+     ) -> torch.Tensor:
+         if draft_logits is not None:
+             logits = self.model.compute_logits(hidden_states)
+-            # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
+-            # used for draft and target sampling.
+             return gumbel_sample(
+                 logits,
+                 idx_mapping,
+                 temperature,
+                 seeds,
+-                positions + 1,
++                sample_src_positions,
+                 apply_temperature=True,
++                is_drafting=True,
+                 logits_cache=draft_logits,
+                 logits_cache_col=draft_step,
+                 use_fp64=self.use_fp64_gumbel,
+diff --git a/vllm/v1/worker/gpu/warmup.py b/vllm/v1/worker/gpu/warmup.py
+index 9d00852..bc140d6 100644
+--- a/vllm/v1/worker/gpu/warmup.py
++++ b/vllm/v1/worker/gpu/warmup.py
+@@ -25,6 +25,33 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+ logger = init_logger(__name__)
+ 
+ 
++def _warmup_block_allocator(model_runner):
++    """Allocate synthetic blocks in the scheduler's pool address spaces."""
++    from vllm.v1.kv_cache_interface import MambaSpec
++
++    config = model_runner.kv_cache_config
++    mamba_capacity = config.musa_mamba_num_blocks
++    next_ids = {}
++
++    def allocate(num_blocks: int, group_id: int) -> list[int]:
++        separate = mamba_capacity is not None and isinstance(
++            config.kv_cache_groups[group_id].kv_cache_spec, MambaSpec
++        )
++        pool_id = group_id if separate else -1
++        capacity = mamba_capacity if separate else config.num_blocks
++        start = next_ids.get(pool_id, 1)
++        end = start + num_blocks
++        if num_blocks < 0 or end > capacity:
++            raise ValueError(
++                f"Warmup group {group_id}: allocation [{start}, {end}) "
++                f"exceeds pool capacity {capacity}"
++            )
++        next_ids[pool_id] = end
++        return list(range(start, end))
++
++    return allocate
++
++
+ def _reserved_block_count(
+     num_tokens: int,
+     kvcache_spec: KVCacheSpec,
+@@ -120,13 +147,7 @@ def run_mixed_prefill_decode_warmup(
+         )
+         return False
+ 
+-    next_block_id = 1
+-
+-    def _alloc_blocks(num_blocks: int) -> list[int]:
+-        nonlocal next_block_id
+-        block_ids = list(range(next_block_id, next_block_id + num_blocks))
+-        next_block_id += num_blocks
+-        return block_ids
++    _alloc_blocks = _warmup_block_allocator(model_runner)
+ 
+     sampling_params = SamplingParams(max_tokens=2, temperature=0.0)
+ 
+@@ -138,7 +159,7 @@ def run_mixed_prefill_decode_warmup(
+             mm_features=[],
+             sampling_params=sampling_params,
+             pooling_params=None,
+-            block_ids=tuple(_alloc_blocks(n) for n in decode_prefill_block_counts),
++            block_ids=tuple(_alloc_blocks(n, i) for i, n in enumerate(decode_prefill_block_counts)),
+             num_computed_tokens=0,
+             lora_request=None,
+             prefill_token_ids=decode_token_ids,
+@@ -150,7 +171,7 @@ def run_mixed_prefill_decode_warmup(
+     decode_prefill_output.total_num_scheduled_tokens = decode_prompt_len
+     decode_prefill_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
+ 
+-    decode_new_blocks = tuple(_alloc_blocks(n) for n in decode_block_deltas)
++    decode_new_blocks = tuple(_alloc_blocks(n, i) for i, n in enumerate(decode_block_deltas))
+     cached_decode_req = CachedRequestData.make_empty()
+     cached_decode_req.req_ids = [decode_req_id]
+     cached_decode_req.num_computed_tokens = [decode_prompt_len]
+@@ -168,7 +189,7 @@ def run_mixed_prefill_decode_warmup(
+             mm_features=[],
+             sampling_params=sampling_params,
+             pooling_params=None,
+-            block_ids=tuple(_alloc_blocks(n) for n in prefill_block_counts),
++            block_ids=tuple(_alloc_blocks(n, i) for i, n in enumerate(prefill_block_counts)),
+             num_computed_tokens=0,
+             lora_request=None,
+             prefill_token_ids=prefill_token_ids,
+@@ -281,11 +302,7 @@ def warmup_kernels(
+         pooling_params = None
+ 
+     # Assign distinct block IDs per request per group. 0 null block, start from 1.
+-    next_block_id = 1
+-
+-    def _alloc_blocks(num_blocks: int) -> list[int]:
+-        nonlocal next_block_id
+-        return list(range(next_block_id, next_block_id := next_block_id + num_blocks))
++    _alloc_blocks = _warmup_block_allocator(model_runner)
+ 
+     # The KV-block zeroing kernel is driven by the scheduler's
+     # new_block_ids_to_zero, so none of the steps below reach it.
+@@ -302,7 +319,7 @@ def warmup_kernels(
+                 pooling_params,
+                 mm_features=warmup_mm_features,
+             ),
+-            block_ids=tuple(_alloc_blocks(n) for n in prefill_block_counts),
++            block_ids=tuple(_alloc_blocks(n, i) for i, n in enumerate(prefill_block_counts)),
+             prefill_token_ids=prompt_token_ids,
+         )
+         for i in range(num_reqs)
+@@ -358,7 +375,7 @@ def warmup_kernels(
+                     for spec, held in zip(kv_cache_specs, req_blocks[i])
+                 ]
+                 cached_req_data.new_block_ids.append(
+-                    tuple(_alloc_blocks(n) for n in deltas) if any(deltas) else None
++                    tuple(_alloc_blocks(n, i) for i, n in enumerate(deltas)) if any(deltas) else None
+                 )
+                 req_blocks[i] = [
+                     held + delta for held, delta in zip(req_blocks[i], deltas)
+diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
+--- a/vllm/v1/worker/gpu_worker.py
++++ b/vllm/v1/worker/gpu_worker.py
+@@ -790,6 +790,10 @@
+         # cuda graph capture.
+         kernel_warmup(self)
+ 
++        if self.use_v2_model_runner:
++            # A workspace resize after capture frees what the graphs point at.
++            warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
++
+         cuda_graph_memory_bytes = 0
+         if not self.model_config.enforce_eager:
+             cuda_graph_memory_bytes = self.model_runner.capture_model()
+@@ -868,10 +872,7 @@
+ 
+             maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
+ 
+-        if self.use_v2_model_runner:
+-            # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.
+-            warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
+-        elif get_pp_group().is_last_rank:
++        if not self.use_v2_model_runner and get_pp_group().is_last_rank:
+             # V1: Warm up sampler and preallocate memory buffer for logits and other
+             # sampling related tensors of max possible shape to avoid memory
+             # fragmentation issue.
