@@ -1,0 +1,21 @@
+--- a/vllm/v1/spec_decode/llm_base_proposer.py
++++ b/vllm/v1/spec_decode/llm_base_proposer.py
+@@ -699,14 +699,10 @@
+ 
+         common_attn_metadata.num_actual_tokens = batch_size
+         common_attn_metadata.max_query_len = 1
+-        # / PR #34880: in-place write keeps the captured graph's
+-        # data_ptr valid across replays (the previous reassignment created a
+-        # fresh tensor each call, stranding the captured FA kernel on a stale
+-        # pointer and collapsing accept rate at positions > 0).
+-        common_attn_metadata.query_start_loc[: batch_size + 1] = self.arange[
+-            : batch_size + 1
+-        ]
+-        common_attn_metadata.query_start_loc_cpu[: batch_size + 1] = torch.from_numpy(
++        # MUSA async draft steps must own this metadata tensor per request;
++        # mutating the shared captured buffer races with the target replay.
++        common_attn_metadata.query_start_loc = self.arange[: batch_size + 1]
++        common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
+             self.token_arange_np[: batch_size + 1]
+         ).clone()
+ 

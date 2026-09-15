@@ -17,6 +17,21 @@ def _topk_module():
     )
 
 
+def _call_topk_kernel(name: str, *args: object) -> None:
+    """Launch a TVM-FFI top-k kernel on PyTorch's current MUSA stream."""
+    kernel = getattr(_topk_module(), name)
+    # TVM FFI keeps an independent stream context.  Synchronize it with the
+    # active torch.musa stream so graph replay and MTP do not race producer and
+    # consumer kernels when the current stream is non-default.
+    if getattr(torch.version, "musa", None) is not None:
+        import tvm_ffi
+
+        with tvm_ffi.use_torch_musa_stream():
+            kernel(*args)
+    else:
+        kernel(*args)
+
+
 def _topk_softmax_impl(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -37,7 +52,8 @@ def _topk_softmax_impl(
         if has_shared_experts
         else topk_weights.reshape(-1)
     )
-    _topk_module().sgl_musa_topk_softmax(
+    _call_topk_kernel(
+        "sgl_musa_topk_softmax",
         topk_weights,
         topk_ids,
         gating_output,
@@ -70,7 +86,8 @@ def _topk_sigmoid_impl(
         if has_shared_experts
         else topk_weights.reshape(-1)
     )
-    _topk_module().sgl_musa_topk_sigmoid(
+    _call_topk_kernel(
+        "sgl_musa_topk_sigmoid",
         topk_weights,
         topk_ids,
         gating_output,
@@ -101,7 +118,8 @@ def _topk_softmax_custom(
         if has_shared_experts
         else topk_weights.reshape(-1)
     )
-    _topk_module().sgl_musa_topk_softmax(
+    _call_topk_kernel(
+        "sgl_musa_topk_softmax",
         topk_weights,
         topk_ids,
         gating_output,
@@ -147,7 +165,8 @@ def _topk_sigmoid_custom(
         if has_shared_experts
         else topk_weights.reshape(-1)
     )
-    _topk_module().sgl_musa_topk_sigmoid(
+    _call_topk_kernel(
+        "sgl_musa_topk_sigmoid",
         topk_weights,
         topk_ids,
         gating_output,

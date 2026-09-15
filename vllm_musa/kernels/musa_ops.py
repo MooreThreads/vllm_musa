@@ -105,6 +105,10 @@ def _jit_fused_add_rms_norm_supports_args(
     # below FUSED_ADD_RMSNORM_MIN_ROWS for eligible H5120/BF16 models, and the
     # lowering pass exposes that range through its pass context. Eager dispatch
     # has concrete shapes.
+    # Dynamo cannot trace get_pass_context(); keep the C++ provider eligible.
+    if torch.compiler.is_compiling():
+        return False
+
     try:
         from vllm.compilation.passes.inductor_pass import get_pass_context
 
@@ -112,12 +116,7 @@ def _jit_fused_add_rms_norm_supports_args(
             get_pass_context().compile_range.start >= FUSED_ADD_RMSNORM_MIN_ROWS
         )
     except AssertionError:
-        # Eager dispatch has concrete shapes. A direct compiled invocation
-        # without vLLM's pass context may have a symbolic row dimension, whose
-        # comparison cannot be evaluated as a Python bool. Fail closed and let
-        # the next provider handle that unsupported integration path.
-        if torch.compiler.is_compiling():
-            return False
+        # Eager dispatch has concrete shapes.
         profitable_rows = x.shape[0] >= FUSED_ADD_RMSNORM_MIN_ROWS
 
     return (
