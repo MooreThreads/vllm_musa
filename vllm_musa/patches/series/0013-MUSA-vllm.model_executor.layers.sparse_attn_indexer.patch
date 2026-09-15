@@ -30,6 +30,9 @@ index d94b377dbe..b924899c31 100644
  
 +
 +def _musa_sparse_indexer_is_current_stream_capturing() -> bool:
++    if torch.compiler.is_compiling():
++        return os.getenv("VLLM_MUSA_SPARSE_INDEXER_GRAPH_EXACT_DECODE", "0") == "1"
++    # Dynamo cannot trace the bool returned by the MUSA runtime query.
 +    for module_name in ("musa", "cuda"):
 +        module = getattr(torch, module_name, None)
 +        if module is None:
