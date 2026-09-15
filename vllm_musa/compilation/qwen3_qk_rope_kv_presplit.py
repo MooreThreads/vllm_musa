@@ -360,6 +360,19 @@ def apply_qwen3_qk_rope_kv_presplit(
                     "cos_sin_cache": candidate.cos_sin_cache,
                     "q_out": q_out,
                     "k_out": k_out,
+                    # The pre-split graph is the dense Qwen3 path.  These
+                    # values are part of the planner's match contract (see
+                    # the RoPE and RMSNorm checks above), but they are not
+                    # represented by the old graph nodes.  Pass them
+                    # explicitly because the fused op also serves Qwen3.5
+                    # and therefore has no schema defaults.
+                    "is_neox": True,
+                    "mrope_section_t": 64,
+                    "mrope_section_h": 0,
+                    "mrope_section_w": 0,
+                    "is_interleaved": False,
+                    "eps": 1e-6,
+                    "gemma": False,
                     "layer_name": candidate.layer_name,
                 },
             )
