@@ -115,6 +115,8 @@ class MUSAMLAPrefillBackend(MLAPrefillBackend):
             v_head_dim=v_head_dim,
             vllm_config=vllm_config,
         )
+        self.flash_attn_varlen_func = flash_attn_varlen_func
+        self._pad_v = False
 
     @staticmethod
     def get_name() -> str:
@@ -141,11 +143,51 @@ class MUSAMLAPrefillBackend(MLAPrefillBackend):
     def prepare_metadata(self, prefill_metadata: MLACommonPrefillMetadata) -> None:
         self._prefill_metadata = prefill_metadata
 
-    def run_prefill_new_tokens(self, *args, **kwargs):
-        raise RuntimeError("MUSA MLA prefill is executed by MLACommonImpl")
+    def _flash_attn_varlen_diff_headdims(self, *args, **kwargs):
+        # Keep the vLLM prefill wrapper (FA3 return/LSE and head-dim contract)
+        # identical to MLACommonImpl while retaining the MUSA backend selector.
+        return MLACommonImpl._flash_attn_varlen_diff_headdims(self, *args, **kwargs)
 
-    def run_prefill_context_chunk(self, *args, **kwargs):
-        raise RuntimeError("MUSA MLA prefill is executed by MLACommonImpl")
+    def run_prefill_new_tokens(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        return_softmax_lse: bool,
+        out: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+    ):
+        """Run MUSA FA3 prefill through the vLLM 0.28 backend contract."""
+        if output_scale is not None:
+            raise NotImplementedError("MUSA MLA prefill does not support output_scale")
+        prefill = self._prefill_metadata
+        assert prefill is not None
+        return MLACommonImpl._run_prefill_new_tokens_fa(
+            self, prefill, q, k, v, return_softmax_lse
+        )
+
+    def run_prefill_context_chunk(
+        self,
+        chunk: "MLACommonPrefillMetadata.ContextChunk",
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        out: torch.Tensor | None = None,
+    ):
+        """Run one vLLM context chunk through MATE FlashAttention."""
+        return self._flash_attn_varlen_diff_headdims(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=chunk.query_start_loc,
+            cu_seqlens_k=chunk.cu_seq_lens,
+            max_seqlen_q=chunk.max_query_len,
+            max_seqlen_k=chunk.max_seq_len,
+            softmax_scale=self.scale,
+            causal=False,
+            return_softmax_lse=True,
+            out=out,
+        )
 
 
 def _get_musa_mla_prefill_backend(vllm_config):
